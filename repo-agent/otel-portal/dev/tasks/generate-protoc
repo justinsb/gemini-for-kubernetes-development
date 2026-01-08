@@ -1,0 +1,16 @@
+#!/bin/bash
+
+set -e
+set -x
+
+
+REPO_ROOT=$(git rev-parse --show-toplevel)
+cd "${REPO_ROOT}"
+
+GOBIN=${REPO_ROOT}/.build/bin/ go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.28
+GOBIN=${REPO_ROOT}/.build/bin/ go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.2
+
+export PATH=${REPO_ROOT}/.build/bin/:$PATH
+
+protoc --go_out=. --go_opt=paths=source_relative repo-agent/otel-portal/api/private/storage/*.proto
+go run golang.org/x/tools/cmd/goimports@latest -w repo-agent/otel-portal/api/private/storage/*.pb.go

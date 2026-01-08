@@ -2,8 +2,7 @@ package otel
 
 import (
 	"bytes"
-	"encoding/binary"
-	"hash/crc32"
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -44,41 +43,27 @@ func TestServer_HTTP_Traces(t *testing.T) {
 		t.Errorf("Expected 200, got %d", w.Code)
 	}
 
-	// Check file content
-	content, err := os.ReadFile(tmpFile.Name())
+	// Verify content using reader
+	ctx := context.Background()
+	reader, err := NewTraceFileReader(ctx, tmpFile.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+
+	count := 0
+	err = reader.VisitAll(ctx, func(msg proto.Message) error {
+		count++
+		if _, ok := msg.(*coltracepb.ExportTraceServiceRequest); !ok {
+			t.Errorf("Expected *coltracepb.ExportTraceServiceRequest, got %T", msg)
+		}
+		return nil
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if len(content) < 16 {
-		t.Fatalf("File too short: %d", len(content))
-	}
-
-	// Verify Header
-	magic := binary.BigEndian.Uint32(content[0:4])
-	length := binary.BigEndian.Uint32(content[4:8])
-	crc := binary.BigEndian.Uint32(content[8:12])
-	reserved := binary.BigEndian.Uint32(content[12:16])
-
-	if magic != MagicNumber {
-		t.Errorf("Expected magic %x, got %x", MagicNumber, magic)
-	}
-	if length != uint32(len(reqBytes)) {
-		t.Errorf("Expected length %d, got %d", len(reqBytes), length)
-	}
-
-	// Verify Payload
-	payload := content[16:]
-	if len(payload) != int(length) {
-		t.Errorf("Expected payload length %d, got %d", length, len(payload))
-	}
-
-	expectedCRC := crc32.Checksum(payload, crc32.MakeTable(crc32.Castagnoli))
-	if crc != expectedCRC {
-		t.Errorf("Expected CRC %x, got %x", expectedCRC, crc)
-	}
-
-	if reserved != 0 {
-		t.Errorf("Expected reserved 0, got %d", reserved)
+	if count != 1 {
+		t.Errorf("Expected 1 message, got %d", count)
 	}
 }

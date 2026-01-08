@@ -1,23 +1,95 @@
-#!/bin/bash
+#!/usr/bin/env python3
 
-set -e
+import subprocess
+import sys
+import datetime
+import os
 
-PROJECT=$(gcloud config get-value project 2>/dev/null)
-if [ -z "$PROJECT" ]; then
-    echo "Error: gcloud project is not set. Please set it with 'gcloud config set project <PROJECT_ID>'"
-    exit 1
-fi
+def run_command(command, cwd=None, capture_output=False, check=True):
+    try:
+        result = subprocess.run(
+            command,
+            cwd=cwd,
+            check=check,
+            shell=True,
+            stdout=subprocess.PIPE if capture_output else None,
+            stderr=subprocess.PIPE if capture_output else None,
+            text=True
+        )
+        return result
+    except subprocess.CalledProcessError as e:
+        if capture_output:
+            # If we were capturing output, print it now that we failed
+            print(f"Error running command: {command}", file=sys.stderr)
+            if e.stdout:
+                print(f"Stdout: {e.stdout}", file=sys.stderr)
+            if e.stderr:
+                print(f"Stderr: {e.stderr}", file=sys.stderr)
+        # If we weren't capturing, it was likely printed to stdout/stderr already
+        sys.exit(e.returncode)
 
-TAG=$(date +%Y%m%d-%H%M%S)
-IMAGE="gcr.io/${PROJECT}/otel-portal:${TAG}"
+def main():
+    # Get the project ID
+    print("Getting gcloud project...")
+    try:
+        project_result = run_command("gcloud config get-value project", capture_output=True)
+        project = project_result.stdout.strip()
+    except Exception:
+        project = ""
 
-echo "Building and pushing ${IMAGE}..."
-# Ensure we are at the repository root
-cd "$(dirname "$0")/../.."
+    if not project:
+        print("Error: gcloud project is not set. Please set it with 'gcloud config set project <PROJECT_ID>'", file=sys.stderr)
+        sys.exit(1)
 
-docker buildx build --push -f images/Dockerfile -t "${IMAGE}" .
+    # Generate tag
+    tag = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    image = f"gcr.io/{project}/otel-portal:{tag}"
 
-echo "Deploying to kubernetes..."
-sed "s|image: otel-portal:latest|image: ${IMAGE}|g" k8s/manifest.yaml | kubectl apply -f -
+    print(f"Building and pushing {image}...")
 
-echo "Deployed ${IMAGE}"
+    # Determine repository root
+    # script is in dev/tasks/
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    repo_root = os.path.abspath(os.path.join(script_dir, "..", ".."))
+
+    # Docker build
+    # Using shell=True for run_command, so we pass the string
+    docker_cmd = f"docker buildx build --push -f images/Dockerfile -t {image} ."
+    run_command(docker_cmd, cwd=repo_root)
+
+    print("Deploying to kubernetes...")
+    
+    # Read manifest
+    manifest_path = os.path.join(repo_root, "k8s/manifest.yaml")
+    try:
+        with open(manifest_path, "r") as f:
+            manifest_content = f.read()
+    except FileNotFoundError:
+        print(f"Error: Manifest file not found at {manifest_path}", file=sys.stderr)
+        sys.exit(1)
+
+    # Substitute image
+    # Note: The original script used sed with | delimiter, assuming "image: otel-portal:latest" exists.
+    # We will do a string replace.
+    target_string = "image: otel-portal:latest"
+    if target_string not in manifest_content:
+        print(f"Warning: '{target_string}' not found in {manifest_path}. Deployment might not update the image.", file=sys.stderr)
+    
+    new_manifest_content = manifest_content.replace(target_string, f"image: {image}")
+
+    # Apply to kubernetes
+    try:
+        # We need to pipe the content to kubectl
+        process = subprocess.Popen(["kubectl", "apply", "-f", "-"], stdin=subprocess.PIPE, cwd=repo_root)
+        process.communicate(input=new_manifest_content.encode('utf-8'))
+        if process.returncode != 0:
+            print("kubectl apply failed", file=sys.stderr)
+            sys.exit(process.returncode)
+    except OSError as e:
+        print(f"Error running kubectl: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"Deployed {image}")
+
+if __name__ == "__main__":
+    main()

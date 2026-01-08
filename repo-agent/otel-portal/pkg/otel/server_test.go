@@ -2,7 +2,6 @@ package otel
 
 import (
 	"bytes"
-	"context"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -13,14 +12,15 @@ import (
 )
 
 func TestServer_HTTP_Traces(t *testing.T) {
-	tmpFile, err := os.CreateTemp("", "otel-test-*.bin")
+	ctx := t.Context()
+
+	tmpDir, err := os.MkdirTemp("", "otel-test-dir-*")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.Remove(tmpFile.Name())
-	tmpFile.Close() // Close so writer can open it
+	defer os.RemoveAll(tmpDir)
 
-	writer, err := NewFileWriter(tmpFile.Name())
+	writer, err := NewFileWriter(ctx, tmpDir, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,8 +44,7 @@ func TestServer_HTTP_Traces(t *testing.T) {
 	}
 
 	// Verify content using reader
-	ctx := context.Background()
-	reader, err := NewTraceFileReader(ctx, tmpFile.Name())
+	reader, err := NewTraceFileReader(ctx, tmpDir)
 	if err != nil {
 		t.Fatal(err)
 	}

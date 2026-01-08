@@ -12,19 +12,19 @@ import (
 )
 
 type OtelDumpOptions struct {
-	SourceFile string
+	SourcePath string
 }
 
 func (o *OtelDumpOptions) InitDefaults() {
-	if o.SourceFile == "" {
-		o.SourceFile = "otel-data.bin"
+	if o.SourcePath == "" {
+		o.SourcePath = "otel-data"
 	}
 }
 
 func RunOtelDump(ctx context.Context, opt OtelDumpOptions) error {
 	w := os.Stdout
 
-	r, err := otel.NewTraceFileReader(ctx, opt.SourceFile)
+	r, err := otel.NewTraceFileReader(ctx, opt.SourcePath)
 	if err != nil {
 		return fmt.Errorf("failed to create file reader: %w", err)
 	}
@@ -66,7 +66,7 @@ func BuildOtelDumpCommand() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringVar(&opt.SourceFile, "source-file", "otel-data.bin", "Path to source file")
+	cmd.Flags().StringVar(&opt.SourcePath, "source-path", "otel-data", "Path to source file or directory")
 
 	return cmd
 }

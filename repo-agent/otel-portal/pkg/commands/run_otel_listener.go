@@ -6,6 +6,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"time"
 
 	"github.com/gke-labs/gemini-for-kubernetes-development/repo-agent/otel-portal/pkg/otel"
 	"github.com/spf13/cobra"
@@ -14,9 +15,10 @@ import (
 )
 
 type OtelListenerOptions struct {
-	GRPCPort   int
-	HTTPPort   int
-	OutputFile string
+	GRPCPort       int
+	HTTPPort       int
+	OutputDir      string
+	RotateInterval time.Duration
 }
 
 func (o *OtelListenerOptions) InitDefaults() {
@@ -26,13 +28,16 @@ func (o *OtelListenerOptions) InitDefaults() {
 	if o.HTTPPort == 0 {
 		o.HTTPPort = 4318
 	}
-	if o.OutputFile == "" {
-		o.OutputFile = "otel-data.bin"
+	if o.OutputDir == "" {
+		o.OutputDir = "otel-data"
+	}
+	if o.RotateInterval == 0 {
+		o.RotateInterval = 5 * time.Minute
 	}
 }
 
 func RunOtelListener(ctx context.Context, opt OtelListenerOptions) error {
-	writer, err := otel.NewFileWriter(opt.OutputFile)
+	writer, err := otel.NewFileWriter(ctx, opt.OutputDir, opt.RotateInterval)
 	if err != nil {
 		return fmt.Errorf("failed to create file writer: %w", err)
 	}
@@ -51,9 +56,9 @@ func RunOtelListener(ctx context.Context, opt OtelListenerOptions) error {
 		}
 		grpcServer := grpc.NewServer()
 		srv.RegisterGRPC(grpcServer)
-		
+
 		log.Printf("Starting gRPC server on %s", addr)
-		
+
 		// Handle graceful shutdown if context is cancelled
 		go func() {
 			<-ctx.Done()
@@ -105,7 +110,8 @@ func BuildOtelListenerCommand() *cobra.Command {
 
 	cmd.Flags().IntVar(&opt.GRPCPort, "grpc-port", 4317, "Port for gRPC listener")
 	cmd.Flags().IntVar(&opt.HTTPPort, "http-port", 4318, "Port for HTTP listener")
-	cmd.Flags().StringVar(&opt.OutputFile, "output-file", "otel-data.bin", "Path to output file")
+	cmd.Flags().StringVar(&opt.OutputDir, "output-dir", "otel-data", "Path to output directory")
+	cmd.Flags().DurationVar(&opt.RotateInterval, "rotate-interval", 5*time.Minute, "Interval to rotate log files")
 
 	return cmd
 }

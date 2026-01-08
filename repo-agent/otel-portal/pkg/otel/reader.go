@@ -8,6 +8,7 @@ import (
 	"hash/crc32"
 	"io"
 	"os"
+	"path/filepath"
 
 	storagepb "github.com/gke-labs/gemini-for-kubernetes-development/repo-agent/otel-portal/api/private/storage"
 	collogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
@@ -69,14 +70,44 @@ func (f *TraceFile) VisitAll(ctx context.Context, callback func(proto.Message) e
 }
 
 func NewTraceFileReader(ctx context.Context, p string) (*TraceFile, error) {
-	log := klog.FromContext(ctx)
-
 	out := &TraceFile{}
+
+	info, err := os.Stat(p)
+	if err != nil {
+		return nil, fmt.Errorf("stat %s: %w", p, err)
+	}
+
+	var filePaths []string
+	if info.IsDir() {
+		entries, err := os.ReadDir(p)
+		if err != nil {
+			return nil, fmt.Errorf("read dir %s: %w", p, err)
+		}
+		for _, e := range entries {
+			if !e.IsDir() {
+				filePaths = append(filePaths, filepath.Join(p, e.Name()))
+			}
+		}
+	} else {
+		filePaths = []string{p}
+	}
+
+	for _, fp := range filePaths {
+		if err := out.readFile(ctx, fp); err != nil {
+			return nil, fmt.Errorf("reading file %s: %w", fp, err)
+		}
+	}
+
+	return out, nil
+}
+
+func (out *TraceFile) readFile(ctx context.Context, p string) error {
+	log := klog.FromContext(ctx)
 
 	log.Info("reading file", "path", p)
 	b, err := os.ReadFile(p)
 	if err != nil {
-		return nil, fmt.Errorf("reading %v: %w", p, err)
+		return fmt.Errorf("reading %v: %w", p, err)
 	}
 
 	r := bytes.NewReader(b)
@@ -91,7 +122,7 @@ func NewTraceFileReader(ctx context.Context, p string) (*TraceFile, error) {
 			if err == io.EOF {
 				break
 			}
-			return nil, fmt.Errorf("reading header: %w", err)
+			return fmt.Errorf("reading header: %w", err)
 		}
 
 		payloadLength := binary.BigEndian.Uint32(header[0:4])
@@ -100,20 +131,20 @@ func NewTraceFileReader(ctx context.Context, p string) (*TraceFile, error) {
 		typeCode := binary.BigEndian.Uint32(header[12:16])
 
 		if flags != 0 {
-			return nil, fmt.Errorf("unexpected flags value %v", flags)
+			return fmt.Errorf("unexpected flags value %v", flags)
 		}
 
 		// TODO: Sanity-check payloadLength
 
 		payload := make([]byte, payloadLength)
 		if _, err := io.ReadFull(r, payload); err != nil {
-			return nil, fmt.Errorf("reading payload: %w", err)
+			return fmt.Errorf("reading payload: %w", err)
 		}
 
 		// Verify checksum
 		actualChecksum := crc32.Checksum(payload, crc32q)
 		if actualChecksum != checksum {
-			return nil, fmt.Errorf("checksum mismatch: expected %x, got %x", checksum, actualChecksum)
+			return fmt.Errorf("checksum mismatch: expected %x, got %x", checksum, actualChecksum)
 		}
 
 		// TODO: Better typeCode parsing
@@ -121,14 +152,14 @@ func NewTraceFileReader(ctx context.Context, p string) (*TraceFile, error) {
 			// TODO: process type definitions
 			defs := &storagepb.ObjectType{}
 			if err := proto.Unmarshal(payload, defs); err != nil {
-				return nil, fmt.Errorf("parsing ObjectTypeDefinitions: %w", err)
+				return fmt.Errorf("parsing ObjectTypeDefinitions: %w", err)
 			}
 			log.V(0).Info("read type definitions", "defs", defs)
 			typeCodes[defs.TypeCode] = defs
 		} else {
 			typeInfo := typeCodes[typeCode]
 			if typeInfo == nil {
-				return nil, fmt.Errorf("unknown type code %d", typeCode)
+				return fmt.Errorf("unknown type code %d", typeCode)
 			}
 
 			typeName := typeInfo.TypeName
@@ -138,7 +169,7 @@ func NewTraceFileReader(ctx context.Context, p string) (*TraceFile, error) {
 				// handled below
 				obj := &coltracepb.ExportTraceServiceRequest{}
 				if err := proto.Unmarshal(payload, obj); err != nil {
-					return nil, fmt.Errorf("parsing ExportTraceServiceRequest: %w", err)
+					return fmt.Errorf("parsing ExportTraceServiceRequest: %w", err)
 				}
 				out.messages = append(out.messages, obj)
 
@@ -146,7 +177,7 @@ func NewTraceFileReader(ctx context.Context, p string) (*TraceFile, error) {
 				// handled below
 				obj := &colmetricspb.ExportMetricsServiceRequest{}
 				if err := proto.Unmarshal(payload, obj); err != nil {
-					return nil, fmt.Errorf("parsing ExportMetricsServiceRequest: %w", err)
+					return fmt.Errorf("parsing ExportMetricsServiceRequest: %w", err)
 				}
 				out.messages = append(out.messages, obj)
 
@@ -154,7 +185,7 @@ func NewTraceFileReader(ctx context.Context, p string) (*TraceFile, error) {
 				// handled below
 				obj := &collogspb.ExportLogsServiceRequest{}
 				if err := proto.Unmarshal(payload, obj); err != nil {
-					return nil, fmt.Errorf("parsing ExportLogsServiceRequest: %w", err)
+					return fmt.Errorf("parsing ExportLogsServiceRequest: %w", err)
 				}
 				out.messages = append(out.messages, obj)
 
@@ -164,7 +195,7 @@ func NewTraceFileReader(ctx context.Context, p string) (*TraceFile, error) {
 		}
 	}
 
-	return out, nil
+	return nil
 }
 
 func (f *TraceFile) Close() error {

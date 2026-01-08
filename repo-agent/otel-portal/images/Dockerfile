@@ -27,4 +27,4 @@ EXPOSE 4317 4318
 USER 65532:65532
 
 ENTRYPOINT ["/otel-portal"]
-CMD ["listen", "--output-file", "/data/otel-data.bin"]
+CMD ["listen", "--output-dir", "/data/otel/", "--rotate-interval", "5m"]

@@ -6,9 +6,10 @@ import (
 	"fmt"
 	"hash/crc32"
 	"os"
+	"path/filepath"
 	"sync"
+	"time"
 
-	"google.golang.org/protobuf/encoding/prototext"
 	"google.golang.org/protobuf/proto"
 	"k8s.io/klog/v2"
 
@@ -16,12 +17,16 @@ import (
 )
 
 type FileWriter struct {
-	w *writer
+	mu            sync.RWMutex
+	dir           string
+	interval      time.Duration
+	currentWriter *writer
 }
 
 type writer struct {
 	fileMutex sync.Mutex
 	f         *os.File
+	size      int64
 
 	typeCodesMutex sync.Mutex
 	nextTypeCode   TypeCode
@@ -30,19 +35,84 @@ type writer struct {
 
 type TypeCode uint32
 
-func NewFileWriter(path string) (*FileWriter, error) {
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
+func NewFileWriter(ctx context.Context, dir string, interval time.Duration) (*FileWriter, error) {
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return nil, fmt.Errorf("creating directory %q: %w", dir, err)
+	}
+
+	fw := &FileWriter{
+		dir:      dir,
+		interval: interval,
+	}
+
+	if err := fw.rotate(ctx); err != nil {
 		return nil, err
 	}
 
-	w := &writer{f: f}
+	if interval > 0 {
+		go fw.runRotation(ctx)
+	}
 
-	w.nextTypeCode = 32
-	w.typeCodes = make(map[string]TypeCode)
-	w.recordWellKnownType(storagepb.WellKnownTypeCode_WellKnownTypeCode_ObjectType, &storagepb.ObjectType{})
+	return fw, nil
+}
 
-	return &FileWriter{w: w}, nil
+func (w *FileWriter) runRotation(ctx context.Context) {
+	ticker := time.NewTicker(w.interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := w.rotate(ctx); err != nil {
+				klog.Errorf("failed to rotate log file: %v", err)
+			}
+		}
+	}
+}
+
+func (w *FileWriter) rotate(ctx context.Context) error {
+	log := klog.FromContext(ctx)
+	// We want rotation to be as atomic as possible and not cancellable.
+	ctx = context.WithoutCancel(ctx)
+
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if w.currentWriter != nil {
+		oldFileName := w.currentWriter.f.Name()
+
+		if err := w.currentWriter.Close(); err != nil {
+			log.Error(err, "failed to close previous file")
+		}
+
+		oldFileSize := w.currentWriter.size
+
+		log.Info("rotated to new file", "oldfile.name", oldFileName, "oldfile.size", oldFileSize)
+
+		w.currentWriter = nil
+	}
+
+	// TODO: Upload old files to GCS
+
+	timestamp := time.Now().Format("20060102-150405")
+	filename := filepath.Join(w.dir, fmt.Sprintf("otel-data-%s.bin", timestamp))
+
+	f, err := os.OpenFile(filename, os.O_TRUNC|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return fmt.Errorf("opening new file %q: %w", filename, err)
+	}
+
+	newWriter := &writer{f: f}
+
+	newWriter.nextTypeCode = 32
+	newWriter.typeCodes = make(map[string]TypeCode)
+	newWriter.recordWellKnownType(storagepb.WellKnownTypeCode_WellKnownTypeCode_ObjectType, &storagepb.ObjectType{})
+
+	w.currentWriter = newWriter
+
+	return nil
 }
 
 // codeForType returns the integer code value for objects of obj.
@@ -87,10 +157,22 @@ func (w *writer) recordWellKnownType(typeCode storagepb.WellKnownTypeCode, obj p
 func (w *FileWriter) Write(ctx context.Context, msg proto.Message) error {
 	log := klog.FromContext(ctx)
 
-	log.Info("writing data to file")
-	log.Info("message:\n" + prototext.Format(msg))
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	cw := w.currentWriter
 
-	return w.w.writeObject(ctx, msg)
+	if cw == nil {
+		return fmt.Errorf("writer closed")
+	}
+
+	if err := cw.writeObject(ctx, msg); err != nil {
+		// If we wrote anything, the file is probably corrupted.
+		// TODO: Should we rotate the file here?  Panic?  Check for specific errors?
+		log.Error(err, "failed to write object")
+		return err
+	}
+
+	return nil
 }
 
 // writeObject appends an object to the file
@@ -138,6 +220,8 @@ func (w *writer) writeObjectWithTypeCode(ctx context.Context, typeCode TypeCode,
 		return fmt.Errorf("writing body: %w", err)
 	}
 
+	w.size += int64(len(header) + len(buf))
+
 	return nil
 }
 
@@ -157,5 +241,11 @@ func (w *writer) Close() error {
 }
 
 func (w *FileWriter) Close() error {
-	return w.w.Close()
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if w.currentWriter != nil {
+		return w.currentWriter.Close()
+	}
+	return nil
 }

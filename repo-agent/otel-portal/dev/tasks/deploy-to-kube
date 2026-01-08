@@ -1,0 +1,23 @@
+#!/bin/bash
+
+set -e
+
+PROJECT=$(gcloud config get-value project 2>/dev/null)
+if [ -z "$PROJECT" ]; then
+    echo "Error: gcloud project is not set. Please set it with 'gcloud config set project <PROJECT_ID>'"
+    exit 1
+fi
+
+TAG=$(date +%Y%m%d-%H%M%S)
+IMAGE="gcr.io/${PROJECT}/otel-portal:${TAG}"
+
+echo "Building and pushing ${IMAGE}..."
+# Ensure we are at the repository root
+cd "$(dirname "$0")/../.."
+
+docker buildx build --push -f images/Dockerfile -t "${IMAGE}" .
+
+echo "Deploying to kubernetes..."
+sed "s|image: otel-portal:latest|image: ${IMAGE}|g" k8s/manifest.yaml | kubectl apply -f -
+
+echo "Deployed ${IMAGE}"

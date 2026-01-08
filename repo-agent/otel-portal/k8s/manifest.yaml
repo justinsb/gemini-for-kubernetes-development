@@ -1,0 +1,58 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: otel-portal
+  labels:
+    app: otel-portal
+spec:
+  ports:
+  - port: 4317
+    name: grpc
+    targetPort: 4317
+    protocol: TCP
+  - port: 4318
+    name: http
+    targetPort: 4318
+    protocol: TCP
+  selector:
+    app: otel-portal
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: otel-portal
+  labels:
+    app: otel-portal
+spec:
+  serviceName: "otel-portal"
+  replicas: 1
+  selector:
+    matchLabels:
+      app: otel-portal
+  template:
+    metadata:
+      labels:
+        app: otel-portal
+    spec:
+      securityContext:
+        fsGroup: 65532
+      containers:
+      - name: otel-portal
+        image: otel-portal:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 4317
+          name: grpc
+        - containerPort: 4318
+          name: http
+        volumeMounts:
+        - name: data
+          mountPath: /data
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      resources:
+        requests:
+          storage: 1Gi

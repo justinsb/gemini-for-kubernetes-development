@@ -191,13 +191,15 @@ func RunGithubFeedback(ctx context.Context, opt GithubFeedbackOptions) error {
 		return fmt.Errorf("failed to generate prompt for pull-request: %w", err)
 	}
 
-	podID, err := findSandboxPod(ctx, opt.Sandbox)
+	podIDPtr, err := findSandboxPod(ctx, opt.Sandbox)
 	if err != nil {
 		return err
 	}
-	if podID == nil {
+
+	if podIDPtr == nil {
 		return fmt.Errorf("sandbox %q not found", opt.Sandbox)
 	}
+	podID := *podIDPtr
 
 	geminiAPIKey, err := GetGeminiAPIKey(podID.Namespace + "/" + podID.Name)
 	if err != nil {

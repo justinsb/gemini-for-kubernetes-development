@@ -91,12 +91,12 @@ func RunGithubFixIssue(ctx context.Context, opt GithubFixIssueOptions) error {
 	sandboxName = strings.ToLower(sandboxName) // Repos can have capital letters, but k8s names must be lowercase
 
 	// 1. Find the pod
-	podID, err := findSandboxPod(ctx, sandboxName)
+	podIDPtr, err := findSandboxPod(ctx, sandboxName)
 	if err != nil {
 		return err
 	}
 
-	if podID == nil {
+	if podIDPtr == nil {
 		log.Info("Creating sandbox", "name", sandboxName, "repos", cloneRepos, "issue", opt.Issue)
 
 		container := v1.Container{}
@@ -140,11 +140,13 @@ func RunGithubFixIssue(ctx context.Context, opt GithubFixIssueOptions) error {
 
 		log.Info("Sandbox created", "name", sandboxName)
 
-		podID = &types.NamespacedName{
+		podIDPtr = &types.NamespacedName{
 			Namespace: kube.CurrentNamespace,
 			Name:      sandboxName,
 		}
 	}
+
+	podID := *podIDPtr
 
 	geminiAPIKey, err := GetGeminiAPIKey(podID.Namespace + "/" + podID.Name)
 	if err != nil {
@@ -295,7 +297,7 @@ type execOptions struct {
 }
 
 // execInPod writes the specified data to a file in the specified pod.
-func execInPod(ctx context.Context, kube *clients.KubernetesClient, podID *types.NamespacedName, opts execOptions) error {
+func execInPod(ctx context.Context, kube *clients.KubernetesClient, podID types.NamespacedName, opts execOptions) error {
 	log := klog.FromContext(ctx)
 
 	redactedCommand := strings.Join(opts.Command, " ")
@@ -358,7 +360,7 @@ func execInPod(ctx context.Context, kube *clients.KubernetesClient, podID *types
 }
 
 // writeFileInPod writes the specified data to a file in the specified pod.
-func writeFileInPod(ctx context.Context, kube *clients.KubernetesClient, podID *types.NamespacedName, path string, data []byte) error {
+func writeFileInPod(ctx context.Context, kube *clients.KubernetesClient, podID types.NamespacedName, path string, data []byte) error {
 	// log := klog.FromContext(ctx)
 
 	var stdout bytes.Buffer
@@ -373,7 +375,7 @@ func writeFileInPod(ctx context.Context, kube *clients.KubernetesClient, podID *
 }
 
 // waitForPodReady waits for the specified pod to be ready.
-func waitForPodReady(ctx context.Context, kube *clients.KubernetesClient, podID *types.NamespacedName) error {
+func waitForPodReady(ctx context.Context, kube *clients.KubernetesClient, podID types.NamespacedName) error {
 	log := klog.FromContext(ctx)
 
 	clientset := kube.Clientset

@@ -222,8 +222,6 @@ func RunGithubFixIssue(ctx context.Context, opt GithubFixIssueOptions) error {
 		}
 	}
 
-	time.Sleep(2 * time.Second) // TODO: Replace with proper wait for git repo to be cloned
-
 	workdir := fmt.Sprintf("/workspaces/%s", repo.FilesystemName())
 
 	// Run gh repo fork
@@ -251,6 +249,32 @@ func RunGithubFixIssue(ctx context.Context, opt GithubFixIssueOptions) error {
 		}
 
 	}
+
+	// Wait for checkout to complete
+	{
+		timeoutAt := time.Now().Add(time.Minute)
+		for {
+			log.Info("Waiting for checkout to be ready")
+
+			var stdout bytes.Buffer
+			opts := execOptions{
+				Command: []string{"git", "-C", workdir, "branch", "--show-current"},
+				Stdout:  &stdout,
+			}
+			if err := execInPod(ctx, kube, podID, opts); err != nil {
+				klog.Infof("stdout: %v", stdout.String())
+				if time.Now().After(timeoutAt) {
+					return fmt.Errorf("timed out waiting for initial checkout to complete: %w", err)
+				}
+			} else {
+				klog.Infof("current branch: %v", stdout.String())
+				break
+			}
+
+			time.Sleep(2 * time.Second)
+		}
+	}
+
 	// Create a new branch
 	{
 		branchName := fmt.Sprintf("issue_%d", opt.Issue)

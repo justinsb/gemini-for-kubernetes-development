@@ -27,8 +27,7 @@ import (
 
 // GithubFixIssueOptions holds options for the RunCode function.
 type GithubFixIssueOptions struct {
-	Repo  string
-	Issue int
+	URL string
 }
 
 // BuildGithubFixIssueCommand creates a new cobra command for using a dev sandbox to solve a github issue
@@ -48,8 +47,7 @@ func BuildGithubFixIssueCommand() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringVar(&opt.Repo, "repo", opt.Repo, "GitHub repository (e.g., gke-labs/gemini-for-kubernetes-development)")
-	cmd.Flags().IntVar(&opt.Issue, "issue", opt.Issue, "GitHub issue number")
+	cmd.Flags().StringVar(&opt.URL, "url", opt.URL, "GitHub issue URL")
 	return cmd
 }
 
@@ -72,8 +70,8 @@ func RunGithubFixIssue(ctx context.Context, opt GithubFixIssueOptions) error {
 		return fmt.Errorf("failed to create github client: %w", err)
 	}
 
-	if opt.Repo == "" {
-		return fmt.Errorf("--repo is required")
+	if opt.URL == "" {
+		return fmt.Errorf("--url is required")
 	}
 
 	issue, err := github.ParseIssueURL(opt.URL)
@@ -81,13 +79,18 @@ func RunGithubFixIssue(ctx context.Context, opt GithubFixIssueOptions) error {
 		return err
 	}
 	repo := issue.Repo
+	issueURL := issue.String()
+
+	cloneRepos := []string{
+		fmt.Sprintf("/workspaces/%s=%s", repo.FilesystemName(), repo.GitCloneURL()),
+	}
 
 	prompt, err := prompts.FixIssuePrompt(ctx, githubAPI, issue)
 	if err != nil {
 		return fmt.Errorf("failed to generate prompt for issue: %w", err)
 	}
 
-	sandboxName := fmt.Sprintf("github-%s-%s-%d", repo.Owner, repo.Name, opt.Issue)
+	sandboxName := fmt.Sprintf("github-%s-%s-%d", repo.Owner, repo.Name, issue.IssueNumber)
 	sandboxName = strings.ToLower(sandboxName) // Repos can have capital letters, but k8s names must be lowercase
 
 	// 1. Find the pod
@@ -97,7 +100,7 @@ func RunGithubFixIssue(ctx context.Context, opt GithubFixIssueOptions) error {
 	}
 
 	if podIDPtr == nil {
-		log.Info("Creating sandbox", "name", sandboxName, "repos", cloneRepos, "issue", opt.Issue)
+		log.Info("Creating sandbox", "name", sandboxName, "repos", cloneRepos, "issue", issue.String())
 
 		container := v1.Container{}
 		container.Name = "agent"
@@ -277,7 +280,7 @@ func RunGithubFixIssue(ctx context.Context, opt GithubFixIssueOptions) error {
 
 	// Create a new branch
 	{
-		branchName := fmt.Sprintf("issue_%d", opt.Issue)
+		branchName := fmt.Sprintf("issue_%d", issue.IssueNumber)
 		log.Info("Creating new branch in pod", "pod", podID.Name, "branch", branchName)
 
 		opts := execOptions{

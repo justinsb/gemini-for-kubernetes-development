@@ -16,8 +16,7 @@ import (
 
 // GithubFeedbackOptions holds options for the RunCode function.
 type GithubFeedbackOptions struct {
-	Repo        string
-	PullRequest int
+	PullRequest string
 	Sandbox     string
 }
 
@@ -39,8 +38,7 @@ func BuildGithubFeedbackCommand() *cobra.Command {
 	}
 
 	cmd.Flags().StringVar(&opt.Sandbox, "sandbox", opt.Sandbox, "Name of existing sandbox to reuse")
-	cmd.Flags().StringVar(&opt.Repo, "repo", opt.Repo, "GitHub repository (e.g., gke-labs/gemini-for-kubernetes-development)")
-	cmd.Flags().IntVar(&opt.PullRequest, "pull-request", opt.PullRequest, "GitHub pull request number")
+	cmd.Flags().StringVar(&opt.PullRequest, "pull-request", opt.PullRequest, "GitHub pull request number")
 	return cmd
 }
 
@@ -58,17 +56,15 @@ func RunGithubFeedback(ctx context.Context, opt GithubFeedbackOptions) error {
 		return err
 	}
 
-	repo, err := github.ParseRepo(opt.Repo)
+	if opt.PullRequest == "" {
+		return fmt.Errorf("--pull-request is required")
+	}
+
+	pullRequest, err := github.ParsePullRequest(opt.PullRequest)
 	if err != nil {
 		return err
 	}
 
-	if opt.PullRequest == 0 {
-		return fmt.Errorf("--pull-request is required")
-	}
-	if opt.Repo == "" {
-		return fmt.Errorf("--repo is required")
-	}
 	if opt.Sandbox == "" {
 		// TODO: We could choose instead to launch a sandbox here
 		return fmt.Errorf("--sandbox is required")
@@ -216,7 +212,7 @@ func RunGithubFeedback(ctx context.Context, opt GithubFeedbackOptions) error {
 		log.Info("wrote prompt into sandbox pod", "pod", podID.Name, "path", path)
 	}
 
-	workdir := fmt.Sprintf("/workspaces/%s", repo.FilesystemName())
+	workdir := fmt.Sprintf("/workspaces/%s", pullRequest.Repo.FilesystemName())
 
 	// Run gemini with API key and prompt
 	{

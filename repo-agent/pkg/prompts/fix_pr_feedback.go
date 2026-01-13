@@ -21,11 +21,13 @@ import (
 //go:embed fix_pr_feedback.txt
 var FixPRFeedbackTemplate string
 
-func FixPRFeedbackPrompt(ctx context.Context, githubAPI *github.Client, repo *github.Repo, prNumber int) ([]byte, error) {
+func FixPRFeedbackPrompt(ctx context.Context, githubAPI *github.Client, pullRequest *github.PullRequest) ([]byte, error) {
 
 	model := FixPRFeedbackPromptModel{}
 
-	pr, _, err := githubAPI.PullRequests.Get(ctx, repo.Owner, repo.Name, prNumber)
+	repo := pullRequest.Repo
+
+	pr, _, err := githubAPI.PullRequests.Get(ctx, repo.Owner, repo.Name, pullRequest.PullRequestNumber)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get github pull request: %w", err)
 	}
@@ -37,7 +39,7 @@ func FixPRFeedbackPrompt(ctx context.Context, githubAPI *github.Client, repo *gi
 		Body:   pr.GetBody(),
 	}
 
-	commits, _, err := githubAPI.PullRequests.ListCommits(ctx, repo.Owner, repo.Name, prNumber, nil)
+	commits, _, err := githubAPI.PullRequests.ListCommits(ctx, repo.Owner, repo.Name, pullRequest.PullRequestNumber, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list github pull request commits: %w", err)
 	}
@@ -49,7 +51,7 @@ func FixPRFeedbackPrompt(ctx context.Context, githubAPI *github.Client, repo *gi
 	}
 
 	issueCommentListOptions := &githubapi.IssueListCommentsOptions{}
-	issueComments, _, err := githubAPI.Issues.ListComments(ctx, repo.Owner, repo.Name, prNumber, issueCommentListOptions)
+	issueComments, _, err := githubAPI.Issues.ListComments(ctx, repo.Owner, repo.Name, pullRequest.PullRequestNumber, issueCommentListOptions)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list github pull request comments: %w", err)
 	}
@@ -68,7 +70,7 @@ func FixPRFeedbackPrompt(ctx context.Context, githubAPI *github.Client, repo *gi
 	}
 
 	prCommentListOptions := &githubapi.PullRequestListCommentsOptions{}
-	prComments, _, err := githubAPI.PullRequests.ListComments(ctx, repo.Owner, repo.Name, prNumber, prCommentListOptions)
+	prComments, _, err := githubAPI.PullRequests.ListComments(ctx, repo.Owner, repo.Name, pullRequest.PullRequestNumber, prCommentListOptions)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list github pull request comments: %w", err)
 	}
@@ -78,7 +80,7 @@ func FixPRFeedbackPrompt(ctx context.Context, githubAPI *github.Client, repo *gi
 	}
 
 	reviewListOptions := &githubapi.ListOptions{PerPage: 100}
-	reviews, _, err := githubAPI.PullRequests.ListReviews(ctx, repo.Owner, repo.Name, prNumber, reviewListOptions)
+	reviews, _, err := githubAPI.PullRequests.ListReviews(ctx, repo.Owner, repo.Name, pullRequest.PullRequestNumber, reviewListOptions)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list github pull request reviews: %w", err)
 	}

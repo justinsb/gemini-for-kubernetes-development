@@ -7,7 +7,7 @@ import (
 )
 
 type Issue struct {
-	Repo Repo
+	Repo *Repo
 
 	IssueNumber int
 }
@@ -19,7 +19,7 @@ func ParseIssueURL(s string) (*Issue, error) {
 	// e.g. https://github.com/GoogleCloudPlatform/k8s-config-connector/issues/6010
 	if len(tokens) == 5 && tokens[0] == "github.com" && tokens[3] == "issues" {
 		issue := &Issue{
-			Repo: Repo{
+			Repo: &Repo{
 				Host:  "github.com",
 				Owner: tokens[1],
 				Name:  tokens[2],

@@ -12,7 +12,7 @@ type PullRequest struct {
 	PullRequestNumber int
 }
 
-func ParsePullRequest(s string) (*PullRequest, error) {
+func ParsePullRequestURL(s string) (*PullRequest, error) {
 	u := strings.TrimPrefix(s, "https://")
 	tokens := strings.Split(u, "/")
 

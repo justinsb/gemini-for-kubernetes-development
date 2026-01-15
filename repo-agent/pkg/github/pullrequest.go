@@ -14,6 +14,12 @@ type PullRequest struct {
 
 func ParsePullRequestURL(s string) (*PullRequest, error) {
 	u := strings.TrimPrefix(s, "https://")
+
+	if prefix, suffix, found := strings.Cut(u, "#"); found {
+		u = prefix
+		_ = suffix // ignore fragment
+	}
+
 	tokens := strings.Split(u, "/")
 
 	// e.g. https://github.com/GoogleCloudPlatform/k8s-config-connector/pull/6010

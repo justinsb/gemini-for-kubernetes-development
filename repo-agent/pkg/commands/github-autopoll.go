@@ -81,7 +81,7 @@ func RunGithubAutopoll(ctx context.Context, opt GithubAutopollOptions) error {
 		kube:            kube,
 		opt:             opt,
 		allowlistMap:    allowlistMap,
-		processedIssues: make(map[string]bool),
+		processedIssues: make(map[string]*Info),
 	}
 
 	// Do an initial poll immediately
@@ -107,7 +107,11 @@ type AutoPoller struct {
 	kube            *clients.KubernetesClient
 	opt             GithubAutopollOptions
 	allowlistMap    map[string]bool
-	processedIssues map[string]bool
+	processedIssues map[string]*Info
+}
+
+type Info struct {
+	Reason string
 }
 
 func (p *AutoPoller) pollOnce(ctx context.Context) error {
@@ -144,8 +148,8 @@ func (p *AutoPoller) pollOnce(ctx context.Context) error {
 			issueKey := fmt.Sprintf("%s/%s#%d", repo.Owner, repo.Name, issue.GetNumber())
 
 			// Skip if already processed in this run
-			if p.processedIssues[issueKey] {
-				log.Info("Skipping issue, already processed", "issue", issueKey)
+			if info := p.processedIssues[issueKey]; info != nil {
+				log.Info("Skipping issue, already processed", "issue", issueKey, "reason", info.Reason)
 				continue
 			}
 
@@ -159,16 +163,21 @@ func (p *AutoPoller) pollOnce(ctx context.Context) error {
 			log.Info("Checking issue for processing", "issue", issueKey, "author", author)
 
 			// Check if issue should be processed
-			shouldProcess, reason := shouldProcessIssue(ctx, p.githubAPI, p.kube, repo, issue)
+			shouldProcess, reason, err := shouldProcessIssue(ctx, p.githubAPI, p.kube, repo, issue)
+			if err != nil {
+				log.Error(err, "error checking if issue should be processed", "issue", issueKey)
+				continue
+			}
 			if !shouldProcess {
 				log.Info("Skipping issue", "issue", issueKey, "reason", reason)
+				p.processedIssues[issueKey] = &Info{Reason: reason}
 				continue
 			}
 
 			log.Info("Processing issue", "issue", issueKey)
 
 			// Mark as processed
-			p.processedIssues[issueKey] = true
+			p.processedIssues[issueKey] = &Info{Reason: "processed"}
 
 			// Create the issue URL and invoke github-fix-issue logic
 			issueURL := fmt.Sprintf("https://github.com/%s/%s/issues/%d", repo.Owner, repo.Name, issue.GetNumber())
@@ -192,18 +201,24 @@ func (p *AutoPoller) pollOnce(ctx context.Context) error {
 // shouldProcessIssue checks if an issue should be processed based on:
 // 1. Whether a PR is already linked
 // 2. Whether a sandbox already exists
-func shouldProcessIssue(ctx context.Context, githubAPI *github.Client, kube *clients.KubernetesClient, repo *github.Repo, issue *gogithub.Issue) (bool, string) {
+func shouldProcessIssue(ctx context.Context, githubAPI *github.Client, kube *clients.KubernetesClient, repo *github.Repo, issue *gogithub.Issue) (bool, string, error) {
 	log := klog.FromContext(ctx)
 
 	// Check if a PR is linked to this issue
-	hasLinkedPR, err := hasLinkedPR(ctx, githubAPI, repo, issue)
+	linkedPR, err := hasLinkedPR(ctx, githubAPI, repo, issue)
 	if err != nil {
-		log.Error(err, "failed to check for linked PR", "issue", issue.GetNumber())
-		// If we can't check, skip this issue for now
-		return false, fmt.Sprintf("error checking linked PR: %v", err)
+		return false, "", fmt.Errorf("failed to check for linked PR: %w", err)
 	}
-	if hasLinkedPR {
-		return false, "issue already has a linked PR"
+
+	for _, pr := range linkedPR {
+		prData, _, err := githubAPI.PullRequests.Get(ctx, pr.Repo.Owner, pr.Repo.Name, pr.PullRequestNumber)
+		if err != nil {
+			return false, "", fmt.Errorf("error fetching linked PR data: %v", err)
+		}
+		switch prData.GetState() {
+		case "open":
+			return false, fmt.Sprintf("issue has an open linked PR %v", prData.GetHTMLURL()), nil
+		}
 	}
 
 	// Check if a sandbox already exists for this issue
@@ -214,37 +229,44 @@ func shouldProcessIssue(ctx context.Context, githubAPI *github.Client, kube *cli
 	if err != nil {
 		log.Error(err, "failed to check for existing sandbox", "sandboxName", sandboxName)
 		// If we can't check, skip this issue for now
-		return false, fmt.Sprintf("error checking sandbox: %v", err)
+		return false, "", fmt.Errorf("error checking sandbox: %v", err)
 	}
 	if podID != nil {
-		return false, "sandbox already exists for this issue"
+		return false, "sandbox already exists for this issue", nil
 	}
 
-	return true, ""
+	return true, "", nil
 }
 
 // hasLinkedPR checks if the issue has any linked pull requests
-func hasLinkedPR(ctx context.Context, githubAPI *github.Client, repo *github.Repo, issue *gogithub.Issue) (bool, error) {
+func hasLinkedPR(ctx context.Context, githubAPI *github.Client, repo *github.Repo, issue *gogithub.Issue) ([]*github.PullRequest, error) {
 	// Use the timeline API to check for linked PRs
 	// GitHub's timeline API shows cross-references including linked PRs
 	timeline, _, err := githubAPI.Issues.ListIssueTimeline(ctx, repo.Owner, repo.Name, issue.GetNumber(), nil)
 	if err != nil {
-		return false, fmt.Errorf("failed to get issue timeline: %w", err)
+		return nil, fmt.Errorf("failed to get issue timeline: %w", err)
 	}
+
+	var prs []*github.PullRequest
 
 	for _, event := range timeline {
 		// Check for cross-referenced events that link to PRs
 		if event.GetEvent() == "cross-referenced" && event.Source != nil {
 			if event.Source.Issue != nil && event.Source.Issue.PullRequestLinks != nil {
-				// This is a PR that references this issue
-				return true, nil
+				u := event.Source.Issue.GetHTMLURL()
+				parsedPR, err := github.ParsePullRequestURL(u)
+				if err != nil {
+					return nil, fmt.Errorf("failed to parse linked PR URL %q: %w", u, err)
+				}
+				prs = append(prs, parsedPR)
 			}
 		}
 		// Also check for connected events (newer GitHub feature for linking issues/PRs)
 		if event.GetEvent() == "connected" {
-			return true, nil
+			klog.Infof("Found connected event (not yet handled in hasLinkedPR): %+v", event)
+			return nil, fmt.Errorf("connected events not yet supported in hasLinkedPR")
 		}
 	}
 
-	return false, nil
+	return prs, nil
 }

@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
+	"net/http"
 	"regexp"
 	"sort"
 	"strconv"
@@ -14,14 +16,10 @@ import (
 	"github.com/gke-labs/gemini-for-kubernetes-development/repo-agent/pkg/github"
 	githubapi "github.com/google/go-github/v39/github"
 	"k8s.io/klog/v2"
-
-	_ "embed"
 )
 
-//go:embed fix_pr_feedback.txt
-var FixPRFeedbackTemplate string
-
-func FixPRFeedbackPrompt(ctx context.Context, githubAPI *github.Client, pullRequest *github.PullRequest) ([]byte, error) {
+func FixPRFeedbackPrompt(ctx context.Context, githubAPI *github.Client, pullRequest *github.PullRequest, alreadyPostedIDs map[string]bool) ([]byte, error) {
+	log := klog.FromContext(ctx)
 
 	model := FixPRFeedbackPromptModel{}
 
@@ -59,6 +57,11 @@ func FixPRFeedbackPrompt(ctx context.Context, githubAPI *github.Client, pullRequ
 		id := comment.GetNodeID()
 
 		klog.V(2).Infof("Comment: %+v", comment)
+		if alreadyPostedIDs[id] {
+			klog.V(2).Infof("Skipping comment %q as already posted", id)
+			continue
+		}
+
 		modelComment := PullRequestComment{
 			ID:        id,
 			Author:    comment.GetUser().GetLogin(),
@@ -86,6 +89,12 @@ func FixPRFeedbackPrompt(ctx context.Context, githubAPI *github.Client, pullRequ
 	}
 	for _, review := range reviews {
 		id := review.GetNodeID()
+
+		if alreadyPostedIDs[id] {
+			klog.V(2).Infof("Skipping review %q as already posted", id)
+			continue
+		}
+
 		modelComment := PullRequestComment{
 			ID:        id,
 			Author:    review.GetUser().GetLogin(),
@@ -112,14 +121,260 @@ func FixPRFeedbackPrompt(ctx context.Context, githubAPI *github.Client, pullRequ
 		model.Comments = append(model.Comments, modelComment)
 	}
 
+	// Add information about test failures
+	if false {
+		options := &githubapi.ListCheckSuiteOptions{}
+		suites, _, err := githubAPI.Checks.ListCheckSuitesForRef(ctx, repo.Owner, repo.Name, pr.GetHead().GetSHA(), options)
+		if err != nil {
+			return nil, fmt.Errorf("failed to list check suites for pull request: %w", err)
+		}
+
+		for _, checkSuite := range suites.CheckSuites {
+			log.Info("found check suite", "name", checkSuite.GetApp().GetName(), "conclusion", checkSuite.GetConclusion())
+
+			var allChecks []*githubapi.CheckRun
+
+			listCheckRunOptions := &githubapi.ListCheckRunsOptions{}
+			listCheckRunOptions.PerPage = 100
+			listCheckRunOptions.Page = 1
+			for {
+				checks, _, err := githubAPI.Checks.ListCheckRunsCheckSuite(ctx, repo.Owner, repo.Name, checkSuite.GetID(), listCheckRunOptions)
+				if err != nil {
+					return nil, fmt.Errorf("failed to list check runs for pull request: %w", err)
+				}
+
+				allChecks = append(allChecks, checks.CheckRuns...)
+				if checks.GetTotal() <= len(allChecks) {
+					break
+				}
+				listCheckRunOptions.Page++
+			}
+
+			for _, check := range allChecks {
+				id := check.GetNodeID()
+				ignoreCheck := false
+				switch check.GetConclusion() {
+				case "success":
+					ignoreCheck = true
+				}
+				if ignoreCheck {
+					continue
+				}
+
+				log.Info("found check", "name", check.GetName(), "conclusion", check.GetConclusion())
+
+				if alreadyPostedIDs[id] {
+					klog.V(2).Infof("Skipping check run %q as already posted", id)
+					continue
+				}
+
+				// Get the logs for this (failed) check
+				// run, _, err := githubAPI.Checks.GetCheckRun(ctx, repo.Owner, repo.Name, check.GetID())
+				// if err != nil {
+				// 	return nil, fmt.Errorf("failed to get check run for pull request: %w", err)
+				// }
+				body := fmt.Sprintf("Check **%s** concluded with status **%s**.\n\nDetails: %s", check.GetName(), check.GetConclusion(), check.GetHTMLURL())
+
+				// logs, _, err := githubAPI.Actions.GetWorkflowRunLogs(ctx, repo.Owner, repo.Name, workflow.GetAttempt(), true)
+				// if err != nil {
+				// 	return nil, fmt.Errorf("failed to get check run logs for pull request: %w", err)
+				// }
+				// body += fmt.Sprintf("\n\nLogs:\n%s", string(logs))
+
+				modelComment := PullRequestComment{
+					Author:    check.GetApp().GetName(),
+					Body:      body,
+					Timestamp: check.GetCompletedAt().Time,
+					ID:        id,
+				}
+				model.Comments = append(model.Comments, modelComment)
+			}
+		}
+
+		// TODO: Pagination?
+	}
+
+	{
+		listWorkflowRunsOptions := &githubapi.ListWorkflowRunsOptions{
+			Branch: pr.GetHead().GetRef(),
+			// CheckSuite: checkSuite.GetID(),
+		}
+
+		runs, _, err := githubAPI.Actions.ListRepositoryWorkflowRuns(ctx, repo.Owner, repo.Name, listWorkflowRunsOptions)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get workflow run for pull request: %w", err)
+		}
+
+		for _, run := range runs.WorkflowRuns {
+
+			skip := false
+			switch run.GetConclusion() {
+			case "success":
+				skip = true
+			}
+			if skip {
+				continue
+			}
+
+			log.Info("found workflow run", "id", run.GetID(), "name", run.GetName(), "conclusion", run.GetConclusion())
+
+			if run.GetHeadSHA() != pr.GetHead().GetSHA() {
+				// log.Info("skipping run as head SHA does not match PR", "runHeadSHA", run.GetHeadSHA(), "prHeadSHA", pr.GetHead().GetSHA())
+				continue
+			}
+
+			runID := run.GetID()
+
+			var allJobs []*githubapi.WorkflowJob
+			{
+				listWorkflowJobsOptions := &githubapi.ListWorkflowJobsOptions{}
+				listWorkflowJobsOptions.Page = 1
+				listWorkflowJobsOptions.PerPage = 100
+				for {
+					jobs, _, err := githubAPI.Actions.ListWorkflowJobs(ctx, repo.Owner, repo.Name, runID, listWorkflowJobsOptions)
+					if err != nil {
+						return nil, fmt.Errorf("failed to list workflow jobs for pull request: %w", err)
+					}
+					allJobs = append(allJobs, jobs.Jobs...)
+					if jobs.GetTotalCount() <= len(allJobs) {
+						break
+					}
+					listWorkflowJobsOptions.Page++
+				}
+			}
+
+			for _, job := range allJobs {
+				id := job.GetNodeID()
+				if alreadyPostedIDs[id] {
+					klog.V(2).Infof("Skipping workflow run %q as already posted", id)
+					continue
+				}
+
+				if job.GetHeadSHA() != pr.GetHead().GetSHA() {
+					// log.Info("skipping job as head SHA does not match PR", "jobHeadSHA", job.GetHeadSHA(), "prHeadSHA", pr.GetHead().GetSHA())
+					continue
+				}
+
+				skip := false
+				switch job.GetConclusion() {
+				case "success":
+					skip = true
+				}
+				if skip {
+					continue
+				}
+
+				// log.Info("found job", "name", job.GetName(), "conclusion", job.GetConclusion(), "status", job.GetStatus(), "headSHA", job.GetHeadSHA(), "jobURL", job.GetHTMLURL())
+
+				body := "Test failed; relevant log lines:\n"
+
+				// body := fmt.Sprintf("Check **%s** concluded with status **%s**.\n\nDetails: %s", check.GetName(), check.GetConclusion(), check.GetHTMLURL())
+				// body += fmt.Sprintf("\n\nrun: %v %v %v %v\n", run.GetID(), run.GetName(), run.GetConclusion(), run.GetStatus())
+
+				if job.GetStatus() != "completed" {
+					continue
+				}
+
+				// Get the logs for this (failed) check
+				followRedirects := true
+				logsURL, _, err := githubAPI.Actions.GetWorkflowJobLogs(ctx, repo.Owner, repo.Name, job.GetID(), followRedirects)
+				if err != nil {
+					return nil, fmt.Errorf("failed to get workflow run logs for pull request: %w", err)
+				}
+
+				httpClient := http.DefaultClient
+
+				klog.Infof("Downloading logs from URL: %v", logsURL.String())
+				logs, err := httpClient.Get(logsURL.String())
+				if err != nil {
+					return nil, fmt.Errorf("failed to download workflow run logs for pull request: %w", err)
+				}
+				defer logs.Body.Close()
+				logsData, err := io.ReadAll(logs.Body)
+				if err != nil {
+					return nil, fmt.Errorf("failed to read workflow run logs for pull request: %w", err)
+				}
+
+				klog.Infof("Downloaded logs for workflow run %q run=%v job=%v: %v", run.GetName(), run.GetID(), job.GetID(), len(logsData))
+
+				logLines := strings.Split(string(logsData), "\n")
+				relevantLines := make(map[int]bool)
+				for lineNum, line := range logLines {
+					// if strings.Contains(line, "ERROR") || strings.Contains(line, "Error") || strings.Contains(line, "error") {
+					// 	klog.Infof("Log line with error: %q", line)
+					// }
+					if strings.Contains(line, "FAIL:") {
+						relevantLines[lineNum] = true
+					}
+					if strings.Contains(line, "<hint_for_agent>") {
+						relevantLines[lineNum] = true
+					}
+				}
+
+				// Fallback to looking for ERROR if no "high confidence lines" found
+				if len(relevantLines) == 0 {
+					for lineNum, line := range logLines {
+						if strings.Contains(line, "ERROR") || strings.Contains(line, "Error") || strings.Contains(line, "error") {
+							relevantLines[lineNum] = true
+						}
+					}
+				}
+
+				// TODO: What if still no relevant lines?
+
+				for relevantLine := range relevantLines {
+					// Include some context lines
+					for i := 1; i <= 2; i++ {
+						if relevantLine-i >= 0 {
+							relevantLines[relevantLine-i] = true
+						}
+						if relevantLine+i < len(logLines) {
+							relevantLines[relevantLine+i] = true
+						}
+					}
+				}
+
+				for lineNum, line := range logLines {
+					if relevantLines[lineNum] {
+						// Add some ... indicators if the lines are not contiguous
+						if lineNum > 0 && !relevantLines[lineNum-1] {
+							body += "...\n"
+						}
+						body += fmt.Sprintf("%4d: %s\n", lineNum+1, line)
+					}
+				}
+
+				modelComment := PullRequestComment{
+					Author:    "GitHub Actions Test " + run.GetName() + "/" + job.GetName(),
+					Body:      body,
+					Timestamp: run.GetUpdatedAt().Time,
+					ID:        id,
+				}
+				model.Comments = append(model.Comments, modelComment)
+			}
+		}
+	}
 	sort.Slice(model.Comments, func(i, j int) bool {
 		return model.Comments[i].Timestamp.Before(model.Comments[j].Timestamp)
 	})
 
-	tmpl, err := template.New("fix_pr_feedback").Parse(FixPRFeedbackTemplate)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse prompt template: %w", err)
+	if len(model.Comments) == 0 {
+		return nil, nil
 	}
+
+	var tmpl *template.Template
+	if len(alreadyPostedIDs) > 0 {
+		tmpl, err = getTemplate("fix_pr_feedback_incremental.txt")
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		tmpl, err = getTemplate("fix_pr_feedback.txt")
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	var w bytes.Buffer
 	if err := tmpl.Execute(&w, &model); err != nil {
 		return nil, fmt.Errorf("failed to execute prompt template: %w", err)

@@ -11,6 +11,7 @@ Tips:
 * Your fork has already been created; the remote is called "origin".  Push your changes to a branch on "origin", using `git push --set-upstream origin <branch>`; setting the upstream helps tooling like gh.
 * Use the github MCP tools to read related issues and PRs, and follow patterns established there.
 * If you get stuck, push a PR but start the PR title with "[WIP]".  Other people on github may have suggestions on how to proceed.  Some tasks are blocked on problems in other libraries, and we probably want to fix those in separate PRs anyway.
+* Where the issue references another issue or a PR, use the github MCP server to read that issue/PR too - there are often important details in those links.
 
 Please create a PR to fix this github issue:
 

@@ -79,14 +79,11 @@ func RunGithubFixIssue(ctx context.Context, opt GithubFixIssueOptions) error {
 		return err
 	}
 	repo := issue.Repo
-<<<<<<< HEAD
 	issueURL := issue.String()
 
 	cloneRepos := []string{
 		fmt.Sprintf("/workspaces/%s=%s", repo.FilesystemName(), repo.GitCloneURL()),
 	}
-=======
->>>>>>> b682eb1 (WIP: autopoll command)
 
 	prompt, err := prompts.FixIssuePrompt(ctx, githubAPI, issue)
 	if err != nil {
@@ -118,10 +115,6 @@ func RunGithubFixIssue(ctx context.Context, opt GithubFixIssueOptions) error {
 		return fmt.Errorf("setting up git branches in sandbox: %w", err)
 	}
 
-	if err := sandbox.CheckoutNewBranch(ctx); err != nil {
-		return fmt.Errorf("checking out branch: %w", err)
-	}
-
 	// Copy the prompt into the pod (for now)
 	if len(prompt) > 0 {
 		log.Info("copying prompt into sandbox pod", "pod", sandbox.podID)
@@ -132,6 +125,10 @@ func RunGithubFixIssue(ctx context.Context, opt GithubFixIssueOptions) error {
 		}
 
 		log.Info("Copied prompt into sandbox pod", "pod", sandbox.podID, "path", path)
+	}
+
+	if err := sandbox.CheckoutNewBranch(ctx); err != nil {
+		return fmt.Errorf("checking out branch: %w", err)
 	}
 
 	// Run gemini with API key and prompt
@@ -553,4 +550,24 @@ func (s *CodebotSandbox) CheckoutExistingBranch(ctx context.Context, branchName 
 	}
 
 	return nil
+}
+
+func (s *CodebotSandbox) ListThreads(ctx context.Context) ([]ThreadInfo, error) {
+	threads, err := listThreads(ctx, s.podID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list threads: %w", err)
+	}
+	return threads, nil
+}
+
+func (s *CodebotSandbox) GetThreadMessages(ctx context.Context, threadID string) ([]ThreadMessage, error) {
+	getThreadOptions := GetThreadsOptions{
+		ThreadID:        threadID,
+		IncludeMessages: true,
+	}
+	thread, err := getThread(ctx, s.podID, getThreadOptions)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get thread %q: %w", threadID, err)
+	}
+	return thread.Messages, nil
 }

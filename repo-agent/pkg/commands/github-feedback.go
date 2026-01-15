@@ -119,7 +119,7 @@ func RunGithubFeedback(ctx context.Context, opt GithubFeedbackOptions) error {
 
 	branchName := pullRequestData.GetHead().GetRef()
 
-	// HACK: Avoid git lock issues
+	// HACK: avoid .git/index.lock conflict with checkout
 	time.Sleep(5 * time.Second)
 
 	if err := sandbox.CheckoutExistingBranch(ctx, branchName); err != nil {
@@ -139,7 +139,7 @@ func RunGithubFeedback(ctx context.Context, opt GithubFeedbackOptions) error {
 
 	if len(threads) > 0 {
 		if len(threads) > 1 {
-			// return fmt.Errorf("multiple threads found in sandbox %q; not yet supported", sandbox.podID)
+			return fmt.Errorf("multiple threads found in sandbox %q; not yet supported", sandbox.podID)
 		}
 
 		// log.Info("found existing thread in sandbox", "thread", threads[0], "messages_count", len(messages))
@@ -182,41 +182,12 @@ func RunGithubFeedback(ctx context.Context, opt GithubFeedbackOptions) error {
 		// haveIDs["PRR_kwDOCrwMCc7aQGTY"] = true
 	}
 
-	prompt, err := prompts.FixPRFeedbackPrompt(ctx, githubAPI, repoInfo, pullRequest, haveIDs)
+	prompt, err := prompts.FixPRFeedbackPrompt(ctx, githubAPI, pullRequest, haveIDs)
 	if err != nil {
 		return fmt.Errorf("failed to generate prompt for pull-request: %w", err)
 	}
 
-	sandbox, found, err := findSandboxForIssue(ctx, kube, repo, issue)
-	if err != nil {
-		return err
-	}
-
-	if !found {
-		sandbox, err = launchSandboxForIssue(ctx, kube, repo, issue)
-		if err != nil {
-			return fmt.Errorf("launching sandbox for issue: %w", err)
-		}
-	}
-
-	if err := sandbox.setupGit(ctx); err != nil {
-		return fmt.Errorf("setting up git in sandbox: %w", err)
-	}
-
-	if err := sandbox.SetupGitRepos(ctx); err != nil {
-		return fmt.Errorf("setting up git branches in sandbox: %w", err)
-	}
-
-	branchName := pullRequestData.GetHead().GetRef()
-
-	if err := sandbox.CheckoutExistingBranch(ctx, branchName); err != nil {
-		return fmt.Errorf("checking out branch %q: %w", branchName, err)
-	}
-
-	geminiAPIKey, err := GetGeminiAPIKey(podID.Namespace + "/" + podID.Name)
-	if err != nil {
-		return err
-	}
+	// klog.Fatalf("generated prompt for pull request feedback:\n%v\n", string(prompt))
 
 	// Copy the prompt into the pod (for now)
 	if len(prompt) > 0 {
@@ -243,6 +214,11 @@ func RunGithubFeedback(ctx context.Context, opt GithubFeedbackOptions) error {
 			Stdout:  os.Stdout,
 			Stderr:  os.Stderr,
 		}
+
+		if appendToThread != "" {
+			opts.Command = []string{"sh", "-c", fmt.Sprintf("cd %s && export GEMINI_API_KEY=%s && gemini --yolo --model gemini-3-pro-preview --resume=%s < /workspaces/prompt.txt", workdir, geminiAPIKey, appendToThread)}
+		}
+
 		opts.Secrets = []string{geminiAPIKey}
 
 		if err := execInPod(ctx, kube, sandbox.podID, opts); err != nil {

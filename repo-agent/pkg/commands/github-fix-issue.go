@@ -122,6 +122,9 @@ func RunGithubFixIssue(ctx context.Context, opt GithubFixIssueOptions) error {
 		log.Info("Copied prompt into sandbox pod", "pod", sandbox.podID, "path", path)
 	}
 
+	// HACK: Avoid git lock issues
+	time.Sleep(5 * time.Second)
+
 	if err := sandbox.CheckoutNewBranch(ctx); err != nil {
 		return fmt.Errorf("checking out branch: %w", err)
 	}

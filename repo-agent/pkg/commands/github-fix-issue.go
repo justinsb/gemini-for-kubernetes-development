@@ -57,11 +57,6 @@ func BuildGithubFixIssueCommand() *cobra.Command {
 func RunGithubFixIssue(ctx context.Context, opt GithubFixIssueOptions) error {
 	log := klog.FromContext(ctx)
 
-	geminiAPIKey := os.Getenv("GEMINI_API_KEY")
-	if geminiAPIKey == "" {
-		return fmt.Errorf("GEMINI_API_KEY environment variable is not set")
-	}
-
 	codebotRobotToken := os.Getenv("CODEBOT_ROBOT_GITHUB_TOKEN")
 	if codebotRobotToken == "" {
 		return fmt.Errorf("CODEBOT_ROBOT_GITHUB_TOKEN environment variable is not set")
@@ -80,21 +75,14 @@ func RunGithubFixIssue(ctx context.Context, opt GithubFixIssueOptions) error {
 	if opt.Repo == "" {
 		return fmt.Errorf("--repo is required")
 	}
-	repo, err := github.ParseRepo(opt.Repo)
+
+	issue, err := github.ParseIssueURL(opt.URL)
 	if err != nil {
 		return err
 	}
+	repo := issue.Repo
 
-	if opt.Issue == 0 {
-		return fmt.Errorf("--issue is required")
-	}
-	issueURL := fmt.Sprintf("https://github.com/%s/issues/%d", opt.Repo, opt.Issue)
-
-	cloneRepos := []string{
-		fmt.Sprintf("/workspaces/%s=%s", repo.FilesystemName(), repo.GitCloneURL()),
-	}
-
-	prompt, err := prompts.FixIssuePrompt(ctx, githubAPI, repo, opt.Issue)
+	prompt, err := prompts.FixIssuePrompt(ctx, githubAPI, issue)
 	if err != nil {
 		return fmt.Errorf("failed to generate prompt for issue: %w", err)
 	}
@@ -156,6 +144,11 @@ func RunGithubFixIssue(ctx context.Context, opt GithubFixIssueOptions) error {
 			Namespace: kube.CurrentNamespace,
 			Name:      sandboxName,
 		}
+	}
+
+	geminiAPIKey, err := GetGeminiAPIKey(podID.Namespace + "/" + podID.Name)
+	if err != nil {
+		return err
 	}
 
 	if err := waitForPodReady(ctx, kube, podID); err != nil {

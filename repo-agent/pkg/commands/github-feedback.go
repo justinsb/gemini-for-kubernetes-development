@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
+	"time"
 
 	"github.com/gke-labs/gemini-for-kubernetes-development/repo-agent/pkg/clients"
 	"github.com/gke-labs/gemini-for-kubernetes-development/repo-agent/pkg/github"
@@ -46,11 +48,6 @@ func BuildGithubFeedbackCommand() *cobra.Command {
 func RunGithubFeedback(ctx context.Context, opt GithubFeedbackOptions) error {
 	log := klog.FromContext(ctx)
 
-	geminiAPIKey := os.Getenv("GEMINI_API_KEY")
-	if geminiAPIKey == "" {
-		return fmt.Errorf("GEMINI_API_KEY environment variable is not set")
-	}
-
 	githubAPI, err := github.NewClient(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to create github client: %w", err)
@@ -77,7 +74,119 @@ func RunGithubFeedback(ctx context.Context, opt GithubFeedbackOptions) error {
 		return fmt.Errorf("--sandbox is required")
 	}
 
-	prompt, err := prompts.FixPRFeedbackPrompt(ctx, githubAPI, repo, opt.PullRequest)
+	issueURL := opt.Issue
+	if issueURL == "" {
+		issueURL, err = findIssueFromPullRequest(ctx, githubAPI, pullRequestID.Repo, pullRequestData)
+		if err != nil {
+			return fmt.Errorf("finding issue from pull request: %w", err)
+		}
+		klog.Infof("inferred issue: %q", issueURL)
+		// return fmt.Errorf("--issue is required")
+	}
+
+	issue, err := github.ParseIssueURL(issueURL)
+	if err != nil {
+		return err
+	}
+
+	repo := issue.Repo
+
+	repoInfo, err := repo.FetchInfo(ctx, githubAPI)
+	if err != nil {
+		return fmt.Errorf("getting repo info: %w", err)
+	}
+
+	sandbox, found, err := findSandboxForIssue(ctx, kube, repo, issue)
+	if err != nil {
+		return err
+	}
+
+	if !found {
+		sandbox, err = launchSandboxForIssue(ctx, kube, repo, issue)
+		if err != nil {
+			return fmt.Errorf("launching sandbox for issue: %w", err)
+		}
+	}
+
+	geminiAPIKey, err := GetGeminiAPIKey(sandbox.podID.Namespace + "/" + sandbox.podID.Name)
+	if err != nil {
+		return err
+	}
+
+	if err := sandbox.setupGit(ctx); err != nil {
+		return fmt.Errorf("setting up git in sandbox: %w", err)
+	}
+
+	if err := sandbox.SetupGitRepos(ctx); err != nil {
+		return fmt.Errorf("setting up git branches in sandbox: %w", err)
+	}
+
+	branchName := pullRequestData.GetHead().GetRef()
+
+	// HACK: Avoid git lock issues
+	time.Sleep(5 * time.Second)
+
+	if err := sandbox.CheckoutExistingBranch(ctx, branchName); err != nil {
+		return err
+	}
+
+	threads, err := sandbox.ListThreads(ctx)
+	if err != nil {
+		return fmt.Errorf("listing threads in sandbox: %w", err)
+	}
+
+	log.Info("found threads in sandbox", "count", len(threads))
+
+	haveIDs := make(map[string]bool)
+
+	appendToThread := ""
+
+	if len(threads) > 0 {
+		if len(threads) > 1 {
+			// return fmt.Errorf("multiple threads found in sandbox %q; not yet supported", sandbox.podID)
+		}
+
+		// log.Info("found existing thread in sandbox", "thread", threads[0], "messages_count", len(messages))
+		appendToThread = threads[0].SessionID
+
+		messages, err := sandbox.GetThreadMessages(ctx, threads[0].SessionID)
+		if err != nil {
+			return fmt.Errorf("getting thread messages: %w", err)
+		}
+
+		for _, msg := range messages {
+			if msg.Type == "gemini" {
+				continue
+			}
+			// log.Info("existing message in thread", "message", msg)
+			for _, line := range strings.Split(msg.Content, "\n") {
+				line = strings.TrimSpace(line)
+				if strings.HasPrefix(line, "GITHUB_ID: ") {
+					tokens := strings.Fields(line)
+					if len(tokens) != 2 {
+						return fmt.Errorf("unexpected ID line format: %q", line)
+					}
+					haveIDs[tokens[1]] = true
+					continue
+				}
+			}
+		}
+
+		// if len(haveIDs) == 0 {
+		// 	return fmt.Errorf("no IDs found in existing thread messages")
+		// }
+
+		// klog.Fatalf("have IDs: %+v", haveIDs)
+
+		// // TODO: Extract IDs from messages
+		// haveIDs["IC_kwDOCrwMCc7fSY9H"] = true
+		// haveIDs["PRR_kwDOCrwMCc7aBBrC"] = true
+		// haveIDs["PRR_kwDOCrwMCc7aCH29"] = true
+		// haveIDs["PRR_kwDOCrwMCc7aPMBx"] = true
+		// haveIDs["PRR_kwDOCrwMCc7aQGTY"] = true
+	}
+
+	prompt, err := prompts.FixPRFeedbackPrompt(ctx, githubAPI, repoInfo, pullRequest, haveIDs)
 	if err != nil {
 		return fmt.Errorf("failed to generate prompt for pull-request: %w", err)
 	}
@@ -88,6 +197,11 @@ func RunGithubFeedback(ctx context.Context, opt GithubFeedbackOptions) error {
 	}
 	if podID == nil {
 		return fmt.Errorf("sandbox %q not found", opt.Sandbox)
+	}
+
+	geminiAPIKey, err := GetGeminiAPIKey(podID.Namespace + "/" + podID.Name)
+	if err != nil {
+		return err
 	}
 
 	// Copy the prompt into the pod (for now)

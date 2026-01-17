@@ -12,7 +12,9 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 )
 
-const repoSandboxBinary = "/repo-agent/dev-sandbox" // "/repo-agent/repo-sandbox"
+// const repoSandboxBinary = "/repo-agent/dev-sandbox"
+
+const repoSandboxBinary = "/repo-agent/repo-sandbox"
 
 // ListThreadsOptions holds options for the ListThreads function.
 type ListThreadsOptions struct {

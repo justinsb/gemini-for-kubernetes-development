@@ -107,7 +107,7 @@ func appendToThread(ctx context.Context, kube *clients.KubernetesClient, podID t
 		return nil, err
 	}
 
-	command := fmt.Sprintf("export GEMINI_API_KEY=%s && /repo-agent/repo-sandbox threads agent", geminiAPIKey)
+	command := fmt.Sprintf("export GEMINI_API_KEY=%s && %s threads agent", geminiAPIKey, repoSandboxBinary)
 	command += fmt.Sprintf(" --thread-id=%s", threadID)
 	command += " --action=append"
 	command += " --cwd=" + cwd

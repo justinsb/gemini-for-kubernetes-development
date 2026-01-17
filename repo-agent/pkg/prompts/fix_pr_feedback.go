@@ -18,7 +18,7 @@ import (
 	"k8s.io/klog/v2"
 )
 
-func FixPRFeedbackPrompt(ctx context.Context, githubAPI *github.Client, pullRequest *github.PullRequest, alreadyPostedIDs map[string]bool) ([]byte, error) {
+func FixPRFeedbackPrompt(ctx context.Context, githubAPI *github.Client, repoInfo *github.RepoInfo, pullRequest *github.PullRequest, alreadyPostedIDs map[string]bool) ([]byte, error) {
 	log := klog.FromContext(ctx)
 
 	model := FixPRFeedbackPromptModel{}
@@ -36,6 +36,9 @@ func FixPRFeedbackPrompt(ctx context.Context, githubAPI *github.Client, pullRequ
 		Title:  pr.GetTitle(),
 		Body:   pr.GetBody(),
 	}
+
+	model.Upstream = repoInfo.GitCloneURL()
+	model.DefaultBranch = repoInfo.DefaultBranch()
 
 	commits, _, err := githubAPI.PullRequests.ListCommits(ctx, repo.Owner, repo.Name, pullRequest.PullRequestNumber, nil)
 	if err != nil {
@@ -243,6 +246,7 @@ func FixPRFeedbackPrompt(ctx context.Context, githubAPI *github.Client, pullRequ
 				}
 			}
 
+			testFailureCount := 0
 			for _, job := range allJobs {
 				id := job.GetNodeID()
 				if alreadyPostedIDs[id] {
@@ -275,11 +279,26 @@ func FixPRFeedbackPrompt(ctx context.Context, githubAPI *github.Client, pullRequ
 					continue
 				}
 
+				// if job.GetStatus() == "skipped" {
+				// 	klog.Warningf("skipping job %q as status is skipped", job.GetName())
+				// 	continue
+				// }
+
+				if job.GetConclusion() == "skipped" {
+					klog.Warningf("skipping job %q as conclusion is skipped", job.GetName())
+					continue
+				}
+
 				// Get the logs for this (failed) check
 				followRedirects := true
 				logsURL, _, err := githubAPI.Actions.GetWorkflowJobLogs(ctx, repo.Owner, repo.Name, job.GetID(), followRedirects)
 				if err != nil {
-					return nil, fmt.Errorf("failed to get workflow run logs for pull request: %w", err)
+					klog.Infof("job conclusion: %q", job.GetConclusion())
+					klog.Infof("job status: %q", job.GetStatus())
+					klog.Infof("job: %+v", job)
+					klog.Warningf("failed to get workflow job logs URL for pull request for job %s: %v", job.GetHTMLURL(), err)
+					// continue
+					return nil, fmt.Errorf("failed to get workflow run logs for pull request for job %s: %w", job.GetHTMLURL(), err)
 				}
 
 				httpClient := http.DefaultClient
@@ -287,12 +306,12 @@ func FixPRFeedbackPrompt(ctx context.Context, githubAPI *github.Client, pullRequ
 				klog.Infof("Downloading logs from URL: %v", logsURL.String())
 				logs, err := httpClient.Get(logsURL.String())
 				if err != nil {
-					return nil, fmt.Errorf("failed to download workflow run logs for pull request: %w", err)
+					return nil, fmt.Errorf("failed to download workflow run logs for pull request for job %s: %w", job.GetHTMLURL(), err)
 				}
 				defer logs.Body.Close()
 				logsData, err := io.ReadAll(logs.Body)
 				if err != nil {
-					return nil, fmt.Errorf("failed to read workflow run logs for pull request: %w", err)
+					return nil, fmt.Errorf("failed to read workflow run logs for pull request for job %s: %w", job.GetHTMLURL(), err)
 				}
 
 				klog.Infof("Downloaded logs for workflow run %q run=%v job=%v: %v", run.GetName(), run.GetID(), job.GetID(), len(logsData))
@@ -322,6 +341,7 @@ func FixPRFeedbackPrompt(ctx context.Context, githubAPI *github.Client, pullRequ
 
 				// TODO: What if still no relevant lines?
 
+				// relevantLineCount := 0
 				for relevantLine := range relevantLines {
 					// Include some context lines
 					for i := 1; i <= 2; i++ {
@@ -332,6 +352,10 @@ func FixPRFeedbackPrompt(ctx context.Context, githubAPI *github.Client, pullRequ
 							relevantLines[relevantLine+i] = true
 						}
 					}
+					// relevantLineCount++
+					// if relevantLineCount >= 5 {
+					// 	break
+					// }
 				}
 
 				for lineNum, line := range logLines {
@@ -351,6 +375,10 @@ func FixPRFeedbackPrompt(ctx context.Context, githubAPI *github.Client, pullRequ
 					ID:        id,
 				}
 				model.Comments = append(model.Comments, modelComment)
+				testFailureCount++
+				if testFailureCount >= 5 {
+					break
+				}
 			}
 		}
 	}
@@ -386,6 +414,9 @@ func FixPRFeedbackPrompt(ctx context.Context, githubAPI *github.Client, pullRequ
 type FixPRFeedbackPromptModel struct {
 	PullRequest PullRequest
 	Comments    []PullRequestComment
+
+	Upstream      string
+	DefaultBranch string
 }
 
 type PullRequest struct {

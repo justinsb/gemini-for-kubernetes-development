@@ -28,6 +28,7 @@ func FixIssuePrompt(ctx context.Context, githubAPI *github.Client, i *github.Iss
 		IssueNumber:      issueData.GetNumber(),
 		IssueTitle:       issueData.GetTitle(),
 		IssueDescription: issueData.GetBody(),
+		Upstream:         repo.GitCloneURL(),
 	}
 
 	comments, _, err := githubAPI.Issues.ListComments(ctx, repo.Owner, repo.Name, i.IssueNumber, nil)
@@ -59,6 +60,8 @@ type FixIssuePromptModel struct {
 	IssueTitle       string
 	IssueDescription string
 	IssueComments    []IssueComment
+
+	Upstream string
 }
 
 type IssueComment struct {

@@ -191,6 +191,13 @@ func (a *threadsAgent) listThreads(ctx context.Context, opt ThreadsAgentOptions)
 	// TODO: Fix identity in dev-sandbox (it will likely trigger some alarms if we keep using root)
 	geminiDir := "/root/.gemini/tmp"
 
+	if _, err := os.Stat(geminiDir); err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to stat gemini dir %q: %w", geminiDir, err)
+	}
+
 	parseGeminiSessionFile := func(path string) error {
 		if filepath.Base(path) == "logs.json" {
 			// ignore

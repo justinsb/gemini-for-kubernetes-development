@@ -4,12 +4,14 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/gke-labs/gemini-for-kubernetes-development/repo-agent/pkg/clients"
 	"github.com/gke-labs/gemini-for-kubernetes-development/repo-agent/pkg/github"
 	"github.com/gke-labs/gemini-for-kubernetes-development/repo-agent/pkg/prompts"
+	githubapi "github.com/google/go-github/v39/github"
 	"github.com/spf13/cobra"
 	"k8s.io/klog/v2"
 )
@@ -65,7 +67,12 @@ func RunGithubFeedback(ctx context.Context, opt GithubFeedbackOptions) error {
 		return err
 	}
 
-	pullRequestData, _, err := githubAPI.PullRequests.Get(ctx, pullRequest.Repo.Owner, pullRequest.Repo.Name, pullRequest.PullRequestNumber)
+	pullRequestID, err := github.ParsePullRequestURL(opt.PullRequest)
+	if err != nil {
+		return err
+	}
+
+	pullRequestData, _, err := githubAPI.PullRequests.Get(ctx, pullRequestID.Repo.Owner, pullRequestID.Repo.Name, pullRequestID.PullRequestNumber)
 	if err != nil {
 		return fmt.Errorf("getting pull request data: %w", err)
 	}
@@ -139,7 +146,7 @@ func RunGithubFeedback(ctx context.Context, opt GithubFeedbackOptions) error {
 
 	if len(threads) > 0 {
 		if len(threads) > 1 {
-			return fmt.Errorf("multiple threads found in sandbox %q; not yet supported", sandbox.podID)
+			// return fmt.Errorf("multiple threads found in sandbox %q; not yet supported", sandbox.podID)
 		}
 
 		// log.Info("found existing thread in sandbox", "thread", threads[0], "messages_count", len(messages))
@@ -182,12 +189,12 @@ func RunGithubFeedback(ctx context.Context, opt GithubFeedbackOptions) error {
 		// haveIDs["PRR_kwDOCrwMCc7aQGTY"] = true
 	}
 
-	prompt, err := prompts.FixPRFeedbackPrompt(ctx, githubAPI, pullRequest, haveIDs)
+	prompt, err := prompts.FixPRFeedbackPrompt(ctx, githubAPI, repoInfo, pullRequest, haveIDs)
 	if err != nil {
 		return fmt.Errorf("failed to generate prompt for pull-request: %w", err)
 	}
 
-	// klog.Fatalf("generated prompt for pull request feedback:\n%v\n", string(prompt))
+	klog.Infof("generated prompt for pull request feedback:\n%v\n", string(prompt))
 
 	// Copy the prompt into the pod (for now)
 	if len(prompt) > 0 {
@@ -227,4 +234,51 @@ func RunGithubFeedback(ctx context.Context, opt GithubFeedbackOptions) error {
 	}
 
 	return nil
+}
+
+// findIssueFromPullRequest attempts to find a linked issue from the pull request description or comments.
+func findIssueFromPullRequest(ctx context.Context, githubAPI *github.Client, repo github.Repo, pullRequest *githubapi.PullRequest) (string, error) {
+	log := klog.FromContext(ctx)
+
+	toURL := func(s string) string {
+		if !strings.HasPrefix(s, "#") {
+			return ""
+		}
+		s = strings.TrimPrefix(s, "#")
+		s = strings.TrimSuffix(s, ":")
+		s = strings.TrimSuffix(s, ".")
+		number, err := strconv.Atoi(s)
+		if err != nil {
+			return ""
+		}
+		u := fmt.Sprintf("https://%s/%s/%s/issues/%d", repo.Host, repo.Owner, repo.Name, number)
+		return u
+	}
+
+	// First, check the pull request body for "Fixes: <issue-url>" or "Resolves: <issue-url>"
+	pullRequestBody := pullRequest.GetBody()
+	log.Info("searching pull request body for linked issue", "body", pullRequestBody)
+	for _, line := range strings.Split(pullRequestBody, "\n") {
+		line = strings.TrimSpace(line)
+		tokens := strings.Fields(line)
+		if len(tokens) >= 2 && (tokens[0] == "Fixes:" || tokens[0] == "Resolves:" || tokens[0] == "Fixes" || tokens[0] == "Resolves") {
+			issueURL := toURL(tokens[1])
+			if issueURL != "" {
+				return issueURL, nil
+			}
+		}
+	}
+
+	// Check the title
+	pullRequestTitle := pullRequest.GetTitle()
+	log.Info("searching pull request title for linked issue", "title", pullRequestTitle)
+	tokens := strings.Fields(pullRequestTitle)
+	if len(tokens) >= 2 && (tokens[0] == "Fixes" || tokens[0] == "Resolves") {
+		issueURL := toURL(tokens[1])
+		if issueURL != "" {
+			return issueURL, nil
+		}
+	}
+
+	return "", fmt.Errorf("no linked issue found in pull request description or title")
 }

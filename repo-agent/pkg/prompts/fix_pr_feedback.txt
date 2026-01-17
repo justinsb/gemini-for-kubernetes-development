@@ -6,6 +6,7 @@ Use good PR hygene:
 
 Tips:
 * Your PR is already checked out; you have a fork which is set up as a remote called "origin".
+* If you need to rebase, you should fetch upstream and rebase on `upstream/{{ .DefaultBranch }}`
 
 
 Your PR:

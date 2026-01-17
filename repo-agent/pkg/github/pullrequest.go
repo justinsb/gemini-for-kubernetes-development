@@ -20,6 +20,9 @@ func ParsePullRequestURL(s string) (*PullRequest, error) {
 		_ = suffix // ignore fragment
 	}
 
+	// Conveneience: handle URLs that end with /changes (when copy and paste from file view)
+	u = strings.TrimSuffix(u, "/changes")
+
 	tokens := strings.Split(u, "/")
 
 	// e.g. https://github.com/GoogleCloudPlatform/k8s-config-connector/pull/6010

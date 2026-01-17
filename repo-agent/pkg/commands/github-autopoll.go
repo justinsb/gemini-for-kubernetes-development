@@ -252,13 +252,23 @@ func hasLinkedPR(ctx context.Context, githubAPI *github.Client, repo *github.Rep
 	for _, event := range timeline {
 		// Check for cross-referenced events that link to PRs
 		if event.GetEvent() == "cross-referenced" && event.Source != nil {
-			if event.Source.Issue != nil && event.Source.Issue.PullRequestLinks != nil {
-				u := event.Source.Issue.GetHTMLURL()
-				parsedPR, err := github.ParsePullRequestURL(u)
-				if err != nil {
-					return nil, fmt.Errorf("failed to parse linked PR URL %q: %w", u, err)
+			// klog.Infof("found cross-referenced event: %+v", event)
+			// klog.Infof("found cross-referenced event.event: %+v", ValueOf(event.Event))
+			// klog.Infof("found cross-referenced event.source: %+v", event.Source)
+			if event.Source.Issue != nil {
+				// We're looking for a PR, not another issue
+				if event.GetSource().GetType() == "issue" {
+					continue
 				}
-				prs = append(prs, parsedPR)
+				klog.Infof("found cross-referenced event.source.issue: %+v", ValueOf(event.Source.Type))
+				if event.Source.Issue.PullRequestLinks != nil {
+					u := event.Source.Issue.GetHTMLURL()
+					parsedPR, err := github.ParsePullRequestURL(u)
+					if err != nil {
+						return nil, fmt.Errorf("failed to parse linked PR URL %q: %w", u, err)
+					}
+					prs = append(prs, parsedPR)
+				}
 			}
 		}
 		// Also check for connected events (newer GitHub feature for linking issues/PRs)
@@ -269,4 +279,12 @@ func hasLinkedPR(ctx context.Context, githubAPI *github.Client, repo *github.Rep
 	}
 
 	return prs, nil
+}
+
+func ValueOf[T any](ptr *T) T {
+	if ptr == nil {
+		var zero T
+		return zero
+	}
+	return *ptr
 }

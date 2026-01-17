@@ -38,5 +38,9 @@ func ParseIssueURL(s string) (*Issue, error) {
 }
 
 func (i *Issue) String() string {
+	return i.HTMLURL()
+}
+
+func (i *Issue) HTMLURL() string {
 	return fmt.Sprintf("https://%s/%s/%s/issues/%d", i.Repo.Host, i.Repo.Owner, i.Repo.Name, i.IssueNumber)
 }

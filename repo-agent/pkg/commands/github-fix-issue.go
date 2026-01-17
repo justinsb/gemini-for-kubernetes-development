@@ -79,11 +79,6 @@ func RunGithubFixIssue(ctx context.Context, opt GithubFixIssueOptions) error {
 		return err
 	}
 	repo := issue.Repo
-	issueURL := issue.String()
-
-	cloneRepos := []string{
-		fmt.Sprintf("/workspaces/%s=%s", repo.FilesystemName(), repo.GitCloneURL()),
-	}
 
 	prompt, err := prompts.FixIssuePrompt(ctx, githubAPI, issue)
 	if err != nil {

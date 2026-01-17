@@ -19,7 +19,7 @@ func main() {
 	defer stopListeningToSignals() // Ensure we stop listening to signals.
 
 	if err := run(ctx); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error: %T %v\n", err, err)
 		os.Exit(1)
 	}
 }
@@ -51,6 +51,7 @@ func run(ctx context.Context) error {
 	rootCommand.AddCommand(commands.BuildGithubAutopollCommand())
 
 	rootCommand.AddCommand(commands.BuildThreadsCommand())
+ 	rootCommand.AddCommand(commands.BuildThreadsCommand())
 
 	// Commands from review-sandbox
 	reviewDaemon := commands.BuildReviewDaemonCommand()

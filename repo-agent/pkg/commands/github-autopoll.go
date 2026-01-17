@@ -19,11 +19,20 @@ type GithubAutopollOptions struct {
 	Allowlist    []string
 	PollInterval time.Duration
 	AssignedTo   string
+
+	// Model is the LLM model to use.
+	Model string
+}
+
+func (o *GithubAutopollOptions) InitDefaults() {
+	o.Model = "gemini-3-pro-preview"
 }
 
 // BuildGithubAutopollCommand creates a new cobra command for autopolling github issues
 func BuildGithubAutopollCommand() *cobra.Command {
 	var opt GithubAutopollOptions
+
+	opt.InitDefaults()
 
 	cmd := &cobra.Command{
 		Use:   "github-autopoll",
@@ -42,6 +51,7 @@ func BuildGithubAutopollCommand() *cobra.Command {
 	cmd.Flags().StringSliceVar(&opt.Allowlist, "allowlist", opt.Allowlist, "Comma-separated list of GitHub users whose issues will be processed")
 	cmd.Flags().DurationVar(&opt.PollInterval, "poll-interval", 60*time.Second, "How often to poll GitHub")
 	cmd.Flags().StringVar(&opt.AssignedTo, "assigned-to", "codebot-robot", "GitHub user to check for assigned issues")
+	cmd.Flags().StringVar(&opt.Model, "model", opt.Model, "LLM model to use")
 
 	return cmd
 }
@@ -188,7 +198,8 @@ func (p *AutoPoller) pollOnce(ctx context.Context) error {
 
 			go func(issueURL string) {
 				fixIssueOpt := GithubFixIssueOptions{
-					URL: issueURL,
+					URL:   issueURL,
+					Model: p.opt.Model,
 				}
 
 				if err := RunGithubFixIssue(ctx, fixIssueOpt); err != nil {
@@ -205,8 +216,22 @@ func (p *AutoPoller) pollOnce(ctx context.Context) error {
 // shouldProcessIssue checks if an issue should be processed based on:
 // 1. Whether a PR is already linked
 // 2. Whether a sandbox already exists
-func shouldProcessIssue(ctx context.Context, githubAPI *github.Client, repo *github.Repo, issue *gogithub.Issue) (bool, string, error) {
+func  shouldProcessIssue(ctx context.Context, githubAPI *github.Client, repo *github.Repo, issue *gogithub.Issue) (bool, string, error) {
 	log := klog.FromContext(ctx)
+
+	// Check if a sandbox already exists for this issue
+	sandboxName := fmt.Sprintf("github-%s-%s-%d", repo.Owner, repo.Name, issue.GetNumber())
+	sandboxName = strings.ToLower(sandboxName)
+
+	podID, err := findSandboxPod(ctx, sandboxName)
+	if err != nil {
+		log.Error(err, "failed to check for existing sandbox", "sandboxName", sandboxName)
+		// If we can't check, skip this issue for now
+		return false, "", fmt.Errorf("error checking sandbox: %v", err)
+	}
+	if podID != nil {
+		return false, "sandbox already exists for this issue", nil
+	}
 
 	// Check if a PR is linked to this issue
 	linkedPR, err := hasLinkedPR(ctx, githubAPI, repo, issue)
@@ -223,20 +248,6 @@ func shouldProcessIssue(ctx context.Context, githubAPI *github.Client, repo *git
 		case "open":
 			return false, fmt.Sprintf("issue has an open linked PR %v", prData.GetHTMLURL()), nil
 		}
-	}
-
-	// Check if a sandbox already exists for this issue
-	sandboxName := fmt.Sprintf("github-%s-%s-%d", repo.Owner, repo.Name, issue.GetNumber())
-	sandboxName = strings.ToLower(sandboxName)
-
-	podID, err := findSandboxPod(ctx, sandboxName)
-	if err != nil {
-		log.Error(err, "failed to check for existing sandbox", "sandboxName", sandboxName)
-		// If we can't check, skip this issue for now
-		return false, "", fmt.Errorf("error checking sandbox: %v", err)
-	}
-	if podID != nil {
-		return false, "sandbox already exists for this issue", nil
 	}
 
 	return true, "", nil
@@ -256,11 +267,15 @@ func hasLinkedPR(ctx context.Context, githubAPI *github.Client, repo *github.Rep
 	for _, event := range timeline {
 		// Check for cross-referenced events that link to PRs
 		if event.GetEvent() == "cross-referenced" && event.Source != nil {
+			// klog.Infof("found cross-referenced event: %+v", event)
+			// klog.Infof("found cross-referenced event.event: %+v", ValueOf(event.Event))
+			// klog.Infof("found cross-referenced event.source: %+v", event.Source)
 			if event.Source.Issue != nil {
 				// We're looking for a PR, not another issue
 				if event.GetSource().GetType() == "issue" {
 					continue
 				}
+				klog.Infof("found cross-referenced event.source.issue: %+v", ValueOf(event.Source.Type))
 				if event.Source.Issue.PullRequestLinks != nil {
 					u := event.Source.Issue.GetHTMLURL()
 					parsedPR, err := github.ParsePullRequestURL(u)

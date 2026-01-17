@@ -283,6 +283,79 @@ func (b *ModelBuilder) addTestFailures(ctx context.Context) error {
 
 	repo := b.repoInfo
 
+	// Add information about test failures
+	if false {
+		options := &githubapi.ListCheckSuiteOptions{}
+		suites, _, err := b.githubAPI.Checks.ListCheckSuitesForRef(ctx, repo.Owner, repo.Name, b.pullRequestInfo.GetHead().GetSHA(), options)
+		if err != nil {
+			return fmt.Errorf("failed to list check suites for pull request: %w", err)
+		}
+
+		for _, checkSuite := range suites.CheckSuites {
+			log.Info("found check suite", "name", checkSuite.GetApp().GetName(), "conclusion", checkSuite.GetConclusion())
+
+			var allChecks []*githubapi.CheckRun
+
+			listCheckRunOptions := &githubapi.ListCheckRunsOptions{}
+			listCheckRunOptions.PerPage = 100
+			listCheckRunOptions.Page = 1
+			for {
+				checks, _, err := b.githubAPI.Checks.ListCheckRunsCheckSuite(ctx, repo.Owner, repo.Name, checkSuite.GetID(), listCheckRunOptions)
+				if err != nil {
+					return fmt.Errorf("failed to list check runs for pull request: %w", err)
+				}
+
+				allChecks = append(allChecks, checks.CheckRuns...)
+				if checks.GetTotal() <= len(allChecks) {
+					break
+				}
+				listCheckRunOptions.Page++
+			}
+
+			for _, check := range allChecks {
+				id := check.GetNodeID()
+				ignoreCheck := false
+				switch check.GetConclusion() {
+				case "success":
+					ignoreCheck = true
+				}
+				if ignoreCheck {
+					continue
+				}
+
+				log.Info("found check", "name", check.GetName(), "conclusion", check.GetConclusion())
+
+				if b.alreadyPostedIDs[id] {
+					klog.V(2).Infof("Skipping check run %q as already posted", id)
+					continue
+				}
+
+				// Get the logs for this (failed) check
+				// run, _, err := githubAPI.Checks.GetCheckRun(ctx, repo.Owner, repo.Name, check.GetID())
+				// if err != nil {
+				// 	return nil, fmt.Errorf("failed to get check run for pull request: %w", err)
+				// }
+				body := fmt.Sprintf("Check **%s** concluded with status **%s**.\n\nDetails: %s", check.GetName(), check.GetConclusion(), check.GetHTMLURL())
+
+				// logs, _, err := githubAPI.Actions.GetWorkflowRunLogs(ctx, repo.Owner, repo.Name, workflow.GetAttempt(), true)
+				// if err != nil {
+				// 	return nil, fmt.Errorf("failed to get check run logs for pull request: %w", err)
+				// }
+				// body += fmt.Sprintf("\n\nLogs:\n%s", string(logs))
+
+				modelComment := PullRequestComment{
+					Author:    check.GetApp().GetName(),
+					Body:      body,
+					Timestamp: check.GetCompletedAt().Time,
+					ID:        id,
+				}
+				b.model.Comments = append(b.model.Comments, modelComment)
+			}
+		}
+
+		// TODO: Pagination?
+	}
+
 	{
 		listWorkflowRunsOptions := &githubapi.ListWorkflowRunsOptions{
 			Branch: b.pullRequestInfo.GetHead().GetRef(),

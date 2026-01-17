@@ -24,11 +24,20 @@ import (
 // GithubFixIssueOptions holds options for the RunCode function.
 type GithubFixIssueOptions struct {
 	URL string
+
+	// Model is the LLM model to use.
+	Model string
+}
+
+func (o *GithubFixIssueOptions) InitDefaults() {
+	o.Model = "gemini-3-pro-preview"
 }
 
 // BuildGithubFixIssueCommand creates a new cobra command for using a dev sandbox to solve a github issue
 func BuildGithubFixIssueCommand() *cobra.Command {
 	var opt GithubFixIssueOptions
+
+	opt.InitDefaults()
 
 	cmd := &cobra.Command{
 		Use:   "github-fix-issue",
@@ -44,6 +53,8 @@ func BuildGithubFixIssueCommand() *cobra.Command {
 	}
 
 	cmd.Flags().StringVar(&opt.URL, "url", opt.URL, "GitHub issue URL")
+	cmd.Flags().StringVar(&opt.Model, "model", opt.Model, "LLM model to use")
+
 	return cmd
 }
 
@@ -106,6 +117,17 @@ func RunGithubFixIssue(ctx context.Context, opt GithubFixIssueOptions) error {
 		return fmt.Errorf("setting up git branches in sandbox: %w", err)
 	}
 
+	// HACK: Avoid git lock issues
+	time.Sleep(5 * time.Second)
+
+	if err := sandbox.CheckoutNewBranch(ctx); err != nil {
+		return fmt.Errorf("checking out branch: %w", err)
+	}
+
+	if err := configureGemini(ctx, sandbox); err != nil {
+		return fmt.Errorf("configuring gemini in sandbox: %w", err)
+	}
+
 	// Copy the prompt into the pod (for now)
 	if len(prompt) > 0 {
 		log.Info("copying prompt into sandbox pod", "pod", sandbox.podID)
@@ -116,17 +138,6 @@ func RunGithubFixIssue(ctx context.Context, opt GithubFixIssueOptions) error {
 		}
 
 		log.Info("Copied prompt into sandbox pod", "pod", sandbox.podID, "path", path)
-	}
-
-	// HACK: Avoid git lock issues
-	time.Sleep(5 * time.Second)
-
-	if err := sandbox.CheckoutNewBranch(ctx); err != nil {
-		return fmt.Errorf("checking out branch: %w", err)
-	}
-
-	if err := configureGemini(ctx, sandbox); err != nil {
-		return fmt.Errorf("configuring gemini in sandbox: %w", err)
 	}
 
 	// Run gemini with API key and prompt
@@ -140,7 +151,7 @@ func RunGithubFixIssue(ctx context.Context, opt GithubFixIssueOptions) error {
 		// export GEMINI_TELEMETRY_OTLP_ENDPOINT=http://otel-portal.otel-system:4317
 
 		opts := execOptions{
-			Command: []string{"sh", "-c", fmt.Sprintf("cd %s && export GEMINI_API_KEY=%s && gemini --yolo --model gemini-3-pro-preview < /workspaces/prompt.txt", workdir, geminiAPIKey)},
+			Command: []string{"sh", "-c", fmt.Sprintf("cd %s && export GEMINI_API_KEY=%s && gemini --yolo --model %s < /workspaces/prompt.txt", workdir, geminiAPIKey, opt.Model)},
 			Stdout:  os.Stdout,
 			Stderr:  os.Stderr,
 		}

@@ -5,6 +5,8 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+
+	"k8s.io/klog/v2"
 )
 
 // GetGeminiAPIKey retrieves the Gemini API key from the environment variable.
@@ -35,6 +37,8 @@ func GetGeminiAPIKey(seed string) (string, error) {
 
 		out, err := cmd.Output()
 		if err != nil {
+			klog.Infof("command is %v", cmd.Args)
+			klog.Infof("Error output from command %v: %v", out, err)
 			return "", err
 		}
 		return strings.TrimSpace(string(out)), nil

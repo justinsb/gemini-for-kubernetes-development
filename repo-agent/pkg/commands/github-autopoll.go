@@ -137,7 +137,7 @@ func (p *AutoPoller) pollOnce(ctx context.Context) error {
 			return fmt.Errorf("failed to list issues for %s: %w", repoStr, err)
 		}
 
-		log.Info("Found issues assigned to bot", "repo", repoStr, "count", len(issues))
+		log.V(2).Info("Found issues assigned to bot", "repo", repoStr, "count", len(issues))
 
 		for _, issue := range issues {
 			// Skip pull requests (GitHub API returns PRs as issues)
@@ -149,7 +149,7 @@ func (p *AutoPoller) pollOnce(ctx context.Context) error {
 
 			// Skip if already processed in this run
 			if info := p.processedIssues[issueKey]; info != nil {
-				log.Info("Skipping issue, already processed", "issue", issueKey, "reason", info.Reason)
+				log.V(2).Info("Skipping issue, already processed", "issue", issueKey, "reason", info.Reason)
 				continue
 			}
 

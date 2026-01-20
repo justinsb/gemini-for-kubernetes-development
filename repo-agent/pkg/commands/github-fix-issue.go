@@ -3,6 +3,7 @@ package commands
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -129,6 +130,10 @@ func RunGithubFixIssue(ctx context.Context, opt GithubFixIssueOptions) error {
 		return fmt.Errorf("checking out branch: %w", err)
 	}
 
+	if err := configureGemini(ctx, sandbox); err != nil {
+		return fmt.Errorf("configuring gemini in sandbox: %w", err)
+	}
+
 	// Run gemini with API key and prompt
 	{
 		log.Info("Running gemini in pod", "pod", sandbox.podID)
@@ -217,12 +222,28 @@ func execInPod(ctx context.Context, kube *clients.KubernetesClient, podID types.
 
 	// Run the command
 	if err := exec.StreamWithContext(ctx, streamOptions); err != nil {
-		log.Error(err, "executing command", "command", redactedCommand, "stdout", stdout.String(), "stderr", stderr.String())
+		log.Error(err, "executing command", "pod", podID, "command", redactedCommand, "stdout", stdout.String(), "stderr", stderr.String())
 		return fmt.Errorf("streaming command in pod: %w", err)
 	}
 
-	log.Info("executed command", "command", redactedCommand, "stdout", stdout.String(), "stderr", stderr.String())
+	log.Info("executed command", "pod", podID, "command", redactedCommand, "stdout", stdout.String(), "stderr", stderr.String())
+	return nil
+}
 
+func (s *CodebotSandbox) MkdirAll(ctx context.Context, path string) error {
+	opts := execOptions{
+		Command: []string{"mkdir", "-p", path},
+	}
+	if err := execInPod(ctx, s.kube, s.podID, opts); err != nil {
+		return fmt.Errorf("creating directory %q in pod: %w", path, err)
+	}
+	return nil
+}
+
+func (s *CodebotSandbox) WriteFile(ctx context.Context, path string, data []byte) error {
+	if err := writeFileInPod(ctx, s.kube, s.podID, path, data); err != nil {
+		return fmt.Errorf("writing file %q in pod: %w", path, err)
+	}
 	return nil
 }
 
@@ -383,6 +404,21 @@ type CodebotSandbox struct {
 	podID types.NamespacedName
 	repo  *github.Repo
 	issue *github.Issue
+}
+
+func (s *CodebotSandbox) ReadFile(ctx context.Context, path string) ([]byte, error) {
+	var stdout bytes.Buffer
+
+	opt := execOptions{
+		Command: []string{"cat", path},
+		Stdout:  &stdout,
+	}
+
+	if err := execInPod(ctx, s.kube, s.podID, opt); err != nil {
+		return nil, fmt.Errorf("reading file %q in pod: %w", path, err)
+	}
+
+	return stdout.Bytes(), nil
 }
 
 func (s *CodebotSandbox) setupGit(ctx context.Context) error {
@@ -568,4 +604,57 @@ func (s *CodebotSandbox) GetThreadMessages(ctx context.Context, threadID string)
 		return nil, fmt.Errorf("failed to get thread %q: %w", threadID, err)
 	}
 	return thread.Messages, nil
+}
+
+func configureGemini(ctx context.Context, sandbox *CodebotSandbox) error {
+	log := klog.FromContext(ctx)
+
+	// Configure gemini
+	{
+		general := map[string]any{
+			"enableAutoUpdate": false,
+			"retryFetchErrors": true,
+		}
+
+		config := map[string]any{
+			"general": general,
+		}
+
+		// Maybe:
+		// general.checkpointing.enabled
+		// output.format
+		// general.sessionRetention.enabled (but false is default)
+		// model.summarizeToolOutput
+		// experimental.enableAgents
+		// experimental.plan
+		// experimental.codebaseInvestigatorSettings
+		// Memory in a shared location?
+		// Hooks?
+		// telemetry?
+		// ui.theme?
+
+		// TODO: Install ripgrep?
+
+		b, err := json.MarshalIndent(config, "", "  ")
+		if err != nil {
+			return fmt.Errorf("marshaling gemini config: %w", err)
+		}
+
+		log.Info("Writing gemini config in pod", "pod", sandbox.podID)
+
+		// if b0, err := sandbox.ReadFile(ctx, "/root/.gemini/settings.json"); err != nil {
+		// 	return fmt.Errorf("reading gemini config in pod: %w", err)
+		// } else {
+		// 	klog.Infof("Existing gemini config: %s", string(b0))
+		// }
+
+		if err := sandbox.MkdirAll(ctx, "/root/.gemini"); err != nil {
+			return fmt.Errorf("creating /root/.gemini directory in pod: %w", err)
+		}
+
+		if err := sandbox.WriteFile(ctx, "/root/.gemini/settings.json", b); err != nil {
+			return fmt.Errorf("writing gemini config in pod: %w", err)
+		}
+	}
+	return nil
 }

@@ -20,11 +20,19 @@ import (
 type GithubFeedbackOptions struct {
 	PullRequest string
 	Issue       string
+
+	Model string
+}
+
+func (o *GithubFeedbackOptions) InitDefaults() {
+	o.Model = "gemini-3-pro-preview"
 }
 
 // BuildGithubFeedbackCommand creates a new cobra command for using a dev sandbox to address github feedback
 func BuildGithubFeedbackCommand() *cobra.Command {
 	var opt GithubFeedbackOptions
+
+	opt.InitDefaults()
 
 	cmd := &cobra.Command{
 		Use:   "github-feedback",
@@ -41,12 +49,16 @@ func BuildGithubFeedbackCommand() *cobra.Command {
 
 	cmd.Flags().StringVar(&opt.Issue, "issue", opt.Issue, "GitHub issue URL")
 	cmd.Flags().StringVar(&opt.PullRequest, "pull-request", opt.PullRequest, "GitHub pull request URL")
+	cmd.Flags().StringVar(&opt.Model, "model", opt.Model, "LLM model to use")
+
 	return cmd
 }
 
 // RunGithubFeedback launches gemini-cli to respond to the specified GitHub pull request feedback.
 func RunGithubFeedback(ctx context.Context, opt GithubFeedbackOptions) error {
 	log := klog.FromContext(ctx)
+
+	model := opt.Model
 
 	githubAPI, err := github.NewClient(ctx)
 	if err != nil {
@@ -114,6 +126,10 @@ func RunGithubFeedback(ctx context.Context, opt GithubFeedbackOptions) error {
 	geminiAPIKey, err := GetGeminiAPIKey(sandbox.podID.Namespace + "/" + sandbox.podID.Name)
 	if err != nil {
 		return err
+	}
+
+	if err := configureGemini(ctx, sandbox); err != nil {
+		return fmt.Errorf("configuring gemini in sandbox: %w", err)
 	}
 
 	if err := sandbox.setupGit(ctx); err != nil {
@@ -216,14 +232,14 @@ func RunGithubFeedback(ctx context.Context, opt GithubFeedbackOptions) error {
 		// export GEMINI_TELEMETRY_ENABLED=true
 		// export GEMINI_TELEMETRY_OTLP_ENDPOINT=http://otel-portal.otel-system:4317
 
+		cmd := []string{"gemini", "--yolo", "--model", model}
+		if appendToThread != "" {
+			cmd = append(cmd, "--resume="+appendToThread)
+		}
 		opts := execOptions{
-			Command: []string{"sh", "-c", fmt.Sprintf("cd %s && export GEMINI_API_KEY=%s && gemini --yolo --model gemini-3-pro-preview < /workspaces/prompt.txt", workdir, geminiAPIKey)},
+			Command: []string{"sh", "-c", fmt.Sprintf("cd %s && export GEMINI_API_KEY=%s &&  %s < /workspaces/prompt.txt", workdir, geminiAPIKey, strings.Join(cmd, " "))},
 			Stdout:  os.Stdout,
 			Stderr:  os.Stderr,
-		}
-
-		if appendToThread != "" {
-			opts.Command = []string{"sh", "-c", fmt.Sprintf("cd %s && export GEMINI_API_KEY=%s && gemini --yolo --model gemini-3-pro-preview --resume=%s < /workspaces/prompt.txt", workdir, geminiAPIKey, appendToThread)}
 		}
 
 		opts.Secrets = []string{geminiAPIKey}

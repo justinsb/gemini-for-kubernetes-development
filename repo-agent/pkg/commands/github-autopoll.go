@@ -156,6 +156,9 @@ func (p *AutoPoller) pollOnce(ctx context.Context) error {
 		for _, issue := range issues {
 			// Skip pull requests (GitHub API returns PRs as issues)
 			if issue.PullRequestLinks != nil {
+				if err := p.processPullRequest(ctx, repo, issue); err != nil {
+					log.Error(err, "failed to process pull request", "pr", issue.GetNumber())
+				}
 				continue
 			}
 
@@ -209,6 +212,43 @@ func (p *AutoPoller) pollOnce(ctx context.Context) error {
 			}(issueURL)
 		}
 	}
+
+	return nil
+}
+
+func (p *AutoPoller) processPullRequest(ctx context.Context, repo *github.Repo, issue *gogithub.Issue) error {
+	log := klog.FromContext(ctx)
+	prNumber := issue.GetNumber()
+	prKey := fmt.Sprintf("%s/%s#%d", repo.Owner, repo.Name, prNumber)
+
+	// Check allowlist (checking issue author, who is the PR author)
+	author := issue.GetUser().GetLogin()
+	if !p.allowlistMap[author] {
+		log.Info("Skipping PR, author not in allowlist", "pr", prKey, "author", author)
+		return nil
+	}
+
+	log.Info("Processing PR", "pr", prKey)
+
+	// Remove assignment
+	_, _, err := p.githubAPI.Issues.RemoveAssignees(ctx, repo.Owner, repo.Name, prNumber, []string{p.opt.AssignedTo})
+	if err != nil {
+		return fmt.Errorf("failed to remove assignee: %w", err)
+	}
+
+	// Trigger RunGithubFeedback
+	// Run asynchronously to not block polling
+	go func() {
+		opt := GithubFeedbackOptions{
+			Repo:        fmt.Sprintf("%s/%s", repo.Owner, repo.Name),
+			PullRequest: prNumber,
+			// Sandbox is empty, let RunGithubFeedback find/create it
+		}
+
+		if err := RunGithubFeedback(ctx, opt); err != nil {
+			log.Error(err, "failed to run github feedback", "pr", prKey)
+		}
+	}()
 
 	return nil
 }

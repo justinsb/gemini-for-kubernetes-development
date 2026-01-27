@@ -23,10 +23,11 @@ import (
 
 // CodebotSandbox represents an agent sandbox being used to fix a GitHub issue.
 type CodebotSandbox struct {
-	kube  *clients.KubernetesClient
-	podID types.NamespacedName
-	repo  *github.Repo
-	issue *github.Issue
+	kube        *clients.KubernetesClient
+	podID       types.NamespacedName
+	repo        *github.Repo
+	issue       *github.Issue
+	pullRequest *github.PullRequest
 }
 
 func (s *CodebotSandbox) MkdirAll(ctx context.Context, path string) error {
@@ -47,11 +48,42 @@ func (s *CodebotSandbox) WriteFile(ctx context.Context, path string, data []byte
 }
 
 func launchSandboxForIssue(ctx context.Context, kube *clients.KubernetesClient, repo *github.Repo, issue *github.Issue) (*CodebotSandbox, error) {
-	log := klog.FromContext(ctx)
-
 	sandboxName := sandboxNameForIssue(repo, issue)
-
 	issueURL := issue.String()
+	
+	sandbox, err := launchSandbox(ctx, kube, sandboxName, repo, issueURL)
+	if err != nil {
+		return nil, err
+	}
+
+	return &CodebotSandbox{
+		kube:  kube,
+		podID: sandbox.podID,
+		repo:  repo,
+		issue: issue,
+	}, nil
+}
+
+func launchSandboxForPullRequest(ctx context.Context, kube *clients.KubernetesClient, repo *github.Repo, pr *github.PullRequest) (*CodebotSandbox, error) {
+	sandboxName := sandboxNameForPullRequest(repo, pr)
+	// TODO: Add support for PR URL?
+	prURL := fmt.Sprintf("https://github.com/%s/%s/pull/%d", repo.Owner, repo.Name, pr.PullRequestNumber)
+
+	sandbox, err := launchSandbox(ctx, kube, sandboxName, repo, prURL)
+	if err != nil {
+		return nil, err
+	}
+
+	return &CodebotSandbox{
+		kube:        kube,
+		podID:       sandbox.podID,
+		repo:        repo,
+		pullRequest: pr,
+	}, nil
+}
+
+func launchSandbox(ctx context.Context, kube *clients.KubernetesClient, sandboxName string, repo *github.Repo, issueURL string) (*CodebotSandbox, error) {
+	log := klog.FromContext(ctx)
 
 	cloneRepos := []string{
 		fmt.Sprintf("/workspaces/%s=%s", repo.FilesystemName(), repo.GitCloneURL()),
@@ -113,14 +145,20 @@ func launchSandboxForIssue(ctx context.Context, kube *clients.KubernetesClient, 
 		kube:  kube,
 		podID: podID,
 		repo:  repo,
-		issue: issue,
 	}, nil
 }
 
 func sandboxNameForIssue(repo *github.Repo, issue *github.Issue) string {
-	sandboxName := fmt.Sprintf("github-%s-%s-%d", repo.Owner, repo.Name, issue.IssueNumber)
-	sandboxName = strings.ToLower(sandboxName) // Repos can have capital letters, but k8s names must be lowercase
+	return sandboxNameForRepoAndNumber(repo, issue.IssueNumber)
+}
 
+func sandboxNameForPullRequest(repo *github.Repo, pr *github.PullRequest) string {
+	return sandboxNameForRepoAndNumber(repo, pr.PullRequestNumber)
+}
+
+func sandboxNameForRepoAndNumber(repo *github.Repo, number int) string {
+	sandboxName := fmt.Sprintf("github-%s-%s-%d", repo.Owner, repo.Name, number)
+	sandboxName = strings.ToLower(sandboxName) // Repos can have capital letters, but k8s names must be lowercase
 	return sandboxName
 }
 
@@ -143,6 +181,27 @@ func findSandboxForIssue(ctx context.Context, kube *clients.KubernetesClient, re
 		issue: issue,
 	}, true, nil
 }
+
+func findSandboxForPullRequest(ctx context.Context, kube *clients.KubernetesClient, repo *github.Repo, pr *github.PullRequest) (*CodebotSandbox, bool, error) {
+	sandboxName := sandboxNameForPullRequest(repo, pr)
+
+	podIDPtr, err := findSandboxPod(ctx, sandboxName)
+	if err != nil {
+		return nil, false, err
+	}
+
+	if podIDPtr == nil {
+		return nil, false, nil
+	}
+
+	return &CodebotSandbox{
+		kube:        kube,
+		podID:       *podIDPtr,
+		repo:        repo,
+		pullRequest: pr,
+	}, true, nil
+}
+
 
 func (s *CodebotSandbox) ReadFile(ctx context.Context, path string) ([]byte, error) {
 	var stdout bytes.Buffer

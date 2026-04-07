@@ -1,6 +1,6 @@
 # --------------------------------
 # Build the repo-sandbox binary
-FROM golang:1.24 AS build-repo-sandbox
+FROM golang:1.26 AS build-repo-sandbox
 WORKDIR /app
 
 # Copy the Go Modules manifests
@@ -22,30 +22,51 @@ RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -v -o /repo-sandbox ./cmd
 # --------------------------------
 
 # Build the gh CLI
-FROM golang:1.24 AS build-gh
+FROM golang:1.26 AS build-gh
 RUN GOBIN=/bin go install github.com/cli/cli/v2/cmd/gh@v2.82.1
-
 
 # --------------------------------
 
 # Main image
-FROM golang:1.24
+FROM golang:1.26
 
 # We want a functional python, because gemini-cli likes to use python
 RUN apt-get update && apt-get install -y python3 python3-pip python3-yaml python-is-python3 python3-venv
 
 RUN apt-get update && apt-get install -y git tmux nodejs npm sudo curl
 
-RUN npm install -g @google/gemini-cli
+#RUN find / -name "baseLlmClient.js"
 
-# Install code-server
-RUN curl -fsSL https://code-server.dev/install.sh | sh
-RUN code-server --install-extension golang.go --install-extension vscodevim.vim
+#RUN npm install -g @google/gemini-cli
+
+
+RUN npm install -g npm@latest
+
+RUN mkdir -p /opt
+RUN git -C /opt clone https://github.com/google-gemini/gemini-cli.git --depth=5
+
+WORKDIR /opt/gemini-cli
+
+# Patch retries
+RUN rgrep const.DEFAULT_MAX_ATTEMPTS .
+RUN sed -i "s@const DEFAULT_MAX_ATTEMPTS = 5;@const DEFAULT_MAX_ATTEMPTS = 50;@g" ./packages/core/src/core/baseLlmClient.ts
+RUN sed -i "s@const DEFAULT_MAX_ATTEMPTS = 10;@const DEFAULT_MAX_ATTEMPTS = 100;@g" ./packages/core/src/utils/retry.ts
+RUN rgrep const.DEFAULT_MAX_ATTEMPTS .
+
+RUN npm install
+RUN npm run build
+RUN npm install -g ./packages/cli
+
+# # Install code-server
+# RUN curl -fsSL https://code-server.dev/install.sh | sh
+# RUN code-server --install-extension golang.go --install-extension vscodevim.vim
 
 COPY --from=build-repo-sandbox /repo-sandbox /repo-agent/repo-sandbox
 COPY --from=build-gh /bin/gh /bin/gh
 
 RUN ln -sf /usr/local/go/bin/go /usr/local/bin/go
+
+RUN gemini --version
 
 WORKDIR /workspaces
 ENTRYPOINT ["/repo-agent/repo-sandbox", "agent"]

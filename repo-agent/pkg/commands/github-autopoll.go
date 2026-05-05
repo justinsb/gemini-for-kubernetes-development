@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gke-labs/gemini-for-kubernetes-development/repo-agent/pkg/clients"
@@ -96,6 +97,7 @@ func RunGithubAutopoll(ctx context.Context, opt GithubAutopollOptions) error {
 		opt:             opt,
 		allowlistMap:    allowlistMap,
 		processedIssues: make(map[string]*Info),
+		running:         make(map[string]*RunningInfo),
 	}
 
 	// Do an initial poll immediately
@@ -116,12 +118,20 @@ func RunGithubAutopoll(ctx context.Context, opt GithubAutopollOptions) error {
 	}
 }
 
+type RunningInfo struct {
+	Error error
+	Done  bool
+}
+
 type AutoPoller struct {
 	githubAPI       *github.Client
 	kube            *clients.KubernetesClient
 	opt             GithubAutopollOptions
 	allowlistMap    map[string]bool
 	processedIssues map[string]*Info
+
+	running      map[string]*RunningInfo
+	runningMutex sync.Mutex
 }
 
 type Info struct {
@@ -156,9 +166,6 @@ func (p *AutoPoller) pollOnce(ctx context.Context) error {
 		for _, issue := range issues {
 			// Skip pull requests (GitHub API returns PRs as issues)
 			if issue.PullRequestLinks != nil {
-				if err := p.processPullRequest(ctx, repo, issue); err != nil {
-					log.Error(err, "failed to process pull request", "pr", issue.GetNumber())
-				}
 				continue
 			}
 
@@ -199,6 +206,11 @@ func (p *AutoPoller) pollOnce(ctx context.Context) error {
 			// Create the issue URL and invoke github-fix-issue logic
 			issueURL := fmt.Sprintf("https://github.com/%s/%s/issues/%d", repo.Owner, repo.Name, issue.GetNumber())
 
+			running := &RunningInfo{}
+			p.runningMutex.Lock()
+			p.running[issueKey] = running
+			p.runningMutex.Unlock()
+
 			go func(issueURL string) {
 				fixIssueOpt := GithubFixIssueOptions{
 					URL:   issueURL,
@@ -208,45 +220,129 @@ func (p *AutoPoller) pollOnce(ctx context.Context) error {
 				if err := RunGithubFixIssue(ctx, fixIssueOpt); err != nil {
 					log.Error(err, "failed to process issue", "issue", issueKey)
 					// Don't return error, continue processing other issues
+					running.Error = err
 				}
+
+				running.Done = true
 			}(issueURL)
 		}
+
+		prs, _, err := p.githubAPI.PullRequests.List(ctx, repo.Owner, repo.Name, &gogithub.PullRequestListOptions{
+			State:     "open",
+			Sort:      "updated",
+			Direction: "desc",
+		})
+		if err != nil {
+			log.Error(err, "failed to list pull requests for repo", "repo", repoStr)
+			continue
+		}
+
+		log.V(2).Info("Found pull requests assigned to bot", "repo", repoStr, "count", len(prs))
+
+		for _, pr := range prs {
+			log.V(2).Info("Processing pull request", "pr", pr.GetNumber())
+			if err := p.processPullRequest(ctx, repo, pr); err != nil {
+				log.Error(err, "failed to process pull request", "pr", pr.GetNumber())
+			}
+		}
+
+	}
+
+	{
+		var running []string
+		p.runningMutex.Lock()
+		for k, info := range p.running {
+			if info.Done {
+				continue
+			}
+			running = append(running, k)
+		}
+		p.runningMutex.Unlock()
+
+		log.Info("Currently processing", "count", len(running), "prs", running)
 	}
 
 	return nil
 }
 
-func (p *AutoPoller) processPullRequest(ctx context.Context, repo *github.Repo, issue *gogithub.Issue) error {
+func (p *AutoPoller) processPullRequest(ctx context.Context, repo *github.Repo, pr *gogithub.PullRequest) error {
 	log := klog.FromContext(ctx)
-	prNumber := issue.GetNumber()
+	prNumber := pr.GetNumber()
 	prKey := fmt.Sprintf("%s/%s#%d", repo.Owner, repo.Name, prNumber)
 
 	// Check allowlist (checking issue author, who is the PR author)
-	author := issue.GetUser().GetLogin()
-	if !p.allowlistMap[author] {
-		log.Info("Skipping PR, author not in allowlist", "pr", prKey, "author", author)
+	author := pr.GetUser().GetLogin()
+	if author != p.opt.AssignedTo {
+		log.V(2).Info("Skipping PR, not created by bot", "pr", prKey, "author", author)
 		return nil
+	}
+
+	assigned := false
+	for _, assignee := range pr.Assignees {
+		if assignee.GetLogin() == p.opt.AssignedTo {
+			// Assigned to bot, process it
+			assigned = true
+			break
+		}
+	}
+
+	if !assigned {
+		log.V(2).Info("Skipping PR, not assigned to bot", "pr", prKey)
+		return nil
+	}
+
+	var runningInfo *RunningInfo
+	{
+		p.runningMutex.Lock()
+		_, found := p.running[prKey]
+		if !found {
+			runningInfo = &RunningInfo{}
+			p.running[prKey] = runningInfo
+		}
+		p.runningMutex.Unlock()
+
+		if found {
+			log.V(2).Info("Skipping PR, already being processed", "pr", prKey)
+			return nil
+		}
 	}
 
 	log.Info("Processing PR", "pr", prKey)
 
-	// Remove assignment
-	_, _, err := p.githubAPI.Issues.RemoveAssignees(ctx, repo.Owner, repo.Name, prNumber, []string{p.opt.AssignedTo})
-	if err != nil {
-		return fmt.Errorf("failed to remove assignee: %w", err)
-	}
+	// // Remove assignment
+	// _, _, err := p.githubAPI.Issues.RemoveAssignees(ctx, repo.Owner, repo.Name, prNumber, []string{p.opt.AssignedTo})
+	// if err != nil {
+	// 	return fmt.Errorf("failed to remove assignee: %w", err)
+	// }
 
 	// Trigger RunGithubFeedback
 	// Run asynchronously to not block polling
 	go func() {
-		opt := GithubFeedbackOptions{
-			Repo:        fmt.Sprintf("%s/%s", repo.Owner, repo.Name),
-			PullRequest: prNumber,
-			// Sandbox is empty, let RunGithubFeedback find/create it
+		opt := GithubFeedbackOptions{}
+
+		opt.InitDefaults()
+
+		opt.Model = p.opt.Model
+		opt.PullRequest = fmt.Sprintf("https://github.com/%s/%s/pull/%v", repo.Owner, repo.Name, prNumber)
+		// Sandbox is empty, let RunGithubFeedback find/create it
+
+		log.Info("doing github feedback for PR", "pr", prKey)
+		if err := RunGithubFeedback(ctx, opt); err != nil {
+			runningInfo.Error = err
+			log.Error(err, "failed to run github feedback", "pr", prKey)
 		}
 
-		if err := RunGithubFeedback(ctx, opt); err != nil {
-			log.Error(err, "failed to run github feedback", "pr", prKey)
+		runningInfo.Done = true
+
+		// Try to unassign the PR from the bot
+		_, _, err := p.githubAPI.Issues.RemoveAssignees(ctx, repo.Owner, repo.Name, prNumber, []string{p.opt.AssignedTo})
+		if err != nil {
+			log.Error(err, "failed to remove assignee", "pr", prKey)
+		} else {
+			// If we were able to unassign, we can use reassignment as a signal for reprocessing
+			p.runningMutex.Lock()
+			delete(p.running, prKey)
+			p.runningMutex.Unlock()
 		}
 	}()
 
@@ -256,7 +352,7 @@ func (p *AutoPoller) processPullRequest(ctx context.Context, repo *github.Repo, 
 // shouldProcessIssue checks if an issue should be processed based on:
 // 1. Whether a PR is already linked
 // 2. Whether a sandbox already exists
-func  shouldProcessIssue(ctx context.Context, githubAPI *github.Client, repo *github.Repo, issue *gogithub.Issue) (bool, string, error) {
+func shouldProcessIssue(ctx context.Context, githubAPI *github.Client, repo *github.Repo, issue *gogithub.Issue) (bool, string, error) {
 	log := klog.FromContext(ctx)
 
 	// Check if a sandbox already exists for this issue
@@ -270,7 +366,7 @@ func  shouldProcessIssue(ctx context.Context, githubAPI *github.Client, repo *gi
 		return false, "", fmt.Errorf("error checking sandbox: %v", err)
 	}
 	if podID != nil {
-		return false, "sandbox already exists for this issue", nil
+		return false, fmt.Sprintf("sandbox already exists for this issue: %v", podID), nil
 	}
 
 	// Check if a PR is linked to this issue
@@ -290,6 +386,8 @@ func  shouldProcessIssue(ctx context.Context, githubAPI *github.Client, repo *gi
 		}
 	}
 
+	klog.Infof("no open linked PRs found for issue %s/%s#%d", repo.Owner, repo.Name, issue.GetNumber())
+
 	return true, "", nil
 }
 
@@ -297,6 +395,7 @@ func  shouldProcessIssue(ctx context.Context, githubAPI *github.Client, repo *gi
 func hasLinkedPR(ctx context.Context, githubAPI *github.Client, repo *github.Repo, issue *gogithub.Issue) ([]*github.PullRequest, error) {
 	// Use the timeline API to check for linked PRs
 	// GitHub's timeline API shows cross-references including linked PRs
+	klog.Infof("checking for linked PRs for issue %s/%s#%d", repo.Owner, repo.Name, issue.GetNumber())
 	timeline, _, err := githubAPI.Issues.ListIssueTimeline(ctx, repo.Owner, repo.Name, issue.GetNumber(), nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get issue timeline: %w", err)
@@ -305,18 +404,22 @@ func hasLinkedPR(ctx context.Context, githubAPI *github.Client, repo *github.Rep
 	var prs []*github.PullRequest
 
 	for _, event := range timeline {
+		klog.Infof("event: %+v", event.GetEvent())
 		// Check for cross-referenced events that link to PRs
 		if event.GetEvent() == "cross-referenced" && event.Source != nil {
-			// klog.Infof("found cross-referenced event: %+v", event)
-			// klog.Infof("found cross-referenced event.event: %+v", ValueOf(event.Event))
+			klog.Infof("found cross-referenced event: %+v", event)
+			klog.Infof("found cross-referenced event.event: %+v", ValueOf(event.Event))
 			// klog.Infof("found cross-referenced event.source: %+v", event.Source)
+			// klog.Infof("found cross-referenced event.source.Issue: %+v", event.Source.Issue)
+			klog.Infof("found cross-referenced event.source.Type: %+v", event.GetSource().GetType())
 			if event.Source.Issue != nil {
 				// We're looking for a PR, not another issue
-				if event.GetSource().GetType() == "issue" {
-					continue
-				}
+				// if event.GetSource().GetType() == "issue" {
+				// 	continue
+				// }
 				klog.Infof("found cross-referenced event.source.issue: %+v", ValueOf(event.Source.Type))
 				if event.Source.Issue.PullRequestLinks != nil {
+					klog.Infof("PullRequestLinks found in cross-referenced event: %+v", ValueOf(event.Source.Issue.PullRequestLinks))
 					u := event.Source.Issue.GetHTMLURL()
 					parsedPR, err := github.ParsePullRequestURL(u)
 					if err != nil {
@@ -333,7 +436,30 @@ func hasLinkedPR(ctx context.Context, githubAPI *github.Client, repo *github.Rep
 		}
 	}
 
-	return prs, nil
+	author := issue.GetUser().GetLogin()
+	if author != "justinsb" {
+		return prs, nil
+	}
+
+	var matches []*github.PullRequest
+	for _, pr := range prs {
+		prObject, _, err := githubAPI.PullRequests.Get(ctx, pr.Repo.Owner, pr.Repo.Name, pr.PullRequestNumber)
+		if err != nil {
+			return nil, fmt.Errorf("error fetching PR data: %v", err)
+		}
+		isOverseer := false
+		for _, label := range prObject.Labels {
+			if label.GetName() == "overseer" {
+				isOverseer = true
+			}
+		}
+		if isOverseer {
+			klog.Infof("Found overseer PR: %s", prObject.GetHTMLURL())
+			continue
+		}
+		matches = append(matches, pr)
+	}
+	return matches, nil
 }
 
 func ValueOf[T any](ptr *T) T {

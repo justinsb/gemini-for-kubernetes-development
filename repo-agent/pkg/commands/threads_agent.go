@@ -3,8 +3,6 @@ package commands
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -152,11 +150,37 @@ type geminiSessionMessage struct {
 	ID        string              `json:"id"`
 	Timestamp time.Time           `json:"timestamp"`
 	Type      string              `json:"type"`
-	Content   string              `json:"content"`
+	Content   json.RawMessage     `json:"content"`
 	Thoughts  []json.RawMessage   `json:"thoughts"`
 	Tokens    geminiSessionTokens `json:"tokens"`
 	Model     string              `json:"model"`
 	ToolCalls []geminiToolCall    `json:"toolCalls"`
+}
+
+func (m *geminiSessionMessage) GetContent() string {
+	// Content is usually a string, but can sometimes be an array of text/thoughts. In that case, we concatenate all the text parts.
+	var out string
+	if m.Content != nil {
+		var s string
+		if err := json.Unmarshal(m.Content, &s); err == nil {
+			out = s
+		} else {
+			var parts []struct {
+				Text string `json:"text"`
+			}
+			if err := json.Unmarshal(m.Content, &parts); err == nil {
+				for _, part := range parts {
+					out += part.Text
+				}
+			} else {
+				klog.Warningf("failed to unmarshal message content as string or array of parts: %q", string(m.Content))
+				// Unexpected format, return the raw content as a string
+				return string(m.Content)
+			}
+		}
+	}
+
+	return out
 }
 
 type geminiSessionTokens struct {
@@ -175,7 +199,7 @@ type geminiToolCall struct {
 	Result                 json.RawMessage `json:"result"`
 	Status                 string          `json:"status"`
 	Timestamp              string          `json:"timestamp"`
-	ResultDisplay          string          `json:"resultDisplay"`
+	ResultDisplay          json.RawMessage `json:"resultDisplay"`
 	DisplayName            string          `json:"displayName"`
 	Description            string          `json:"description"`
 	RenderOutputAsMarkdown bool            `json:"renderOutputAsMarkdown"`
@@ -196,7 +220,35 @@ func (a *threadsAgent) listThreads(ctx context.Context, opt ThreadsAgentOptions)
 		return out, nil
 	}
 
-	parseGeminiSessionFile := func(path string) error {
+	projectRoots := make(map[string][]string)
+
+	// Look for .project_root files, which contain the absolute path to the workspace directory.
+	// We use this to infer the workspace for each thread, which is not actually stored in the gemini session files.
+	if err := filepath.WalkDir(geminiDir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		name := d.Name()
+		if name == ".project_root" {
+			b, err := os.ReadFile(path)
+			if err != nil {
+				return fmt.Errorf("failed to read .project_root file %q: %w", path, err)
+			}
+			workspace := string(bytes.TrimSpace(b))
+			projectDir := filepath.Dir(path)
+			log.Info("Found .project_root file, inferred workspace", "projectDir", projectDir, "workspace", workspace)
+			projectRoots[workspace] = append(projectRoots[workspace], projectDir)
+			return nil
+		}
+		return nil
+	}); err != nil {
+		return nil, fmt.Errorf("failed to walk gemini dir %q: %w", geminiDir, err)
+	}
+
+	parseGeminiSessionFile := func(projectRoot string, path string) error {
 		if filepath.Base(path) == "logs.json" {
 			// ignore
 			return nil
@@ -224,11 +276,7 @@ func (a *threadsAgent) listThreads(ctx context.Context, opt ThreadsAgentOptions)
 			thread.StartTime = t
 		}
 
-		workspace, err := inferWorkspace(path)
-		if err != nil {
-			log.Error(err, "failed to infer workspace from gemini session file path", "path", path)
-		}
-		thread.Workspace = workspace
+		thread.ProjectRoot = projectRoot
 
 		// Compute token statistics
 		for _, msg := range session.Messages {
@@ -241,7 +289,7 @@ func (a *threadsAgent) listThreads(ctx context.Context, opt ThreadsAgentOptions)
 					ID:        msg.ID,
 					Timestamp: msg.Timestamp,
 					Type:      msg.Type,
-					Content:   msg.Content,
+					Content:   msg.GetContent(),
 					Model:     msg.Model,
 				}
 				for _, toolCall := range msg.ToolCalls {
@@ -260,64 +308,152 @@ func (a *threadsAgent) listThreads(ctx context.Context, opt ThreadsAgentOptions)
 		out = append(out, thread)
 		return nil
 	}
-	if err := filepath.WalkDir(geminiDir, func(path string, d os.DirEntry, err error) error {
+
+	parseJsonlGeminiSessionFile := func(projectRoot string, path string) error {
+		b, err := os.ReadFile(path)
 		if err != nil {
-			return err
+			return fmt.Errorf("failed to read gemini session file %q: %w", path, err)
 		}
-		if d.IsDir() {
-			return nil
+
+		var thread ThreadInfo
+		for i, line := range bytes.Split(b, []byte("\n")) {
+			line = bytes.TrimSpace(line)
+
+			if i == 0 {
+				var session geminiSessionInfo
+
+				if err := json.Unmarshal(line, &session); err != nil {
+					return fmt.Errorf("failed to unmarshal gemini session line %q %q: %w", path, line, err)
+				}
+				if opt.ThreadID != "" && session.SessionID != opt.ThreadID {
+					return nil
+				}
+
+				thread = ThreadInfo{
+					SessionID:   session.SessionID,
+					ProjectHash: session.ProjectHash,
+				}
+
+				if t, err := time.Parse(time.RFC3339, session.StartTime); err != nil {
+					log.Error(err, "failed to parse start time", "startTime", session.StartTime, "path", path)
+				} else {
+					thread.StartTime = t
+				}
+
+				thread.ProjectRoot = projectRoot
+
+				continue
+			}
+
+			if len(line) == 0 {
+				continue
+			}
+			if !opt.IncludeMessages {
+				continue
+			}
+
+			var msg geminiSessionMessage
+			if err := json.Unmarshal(line, &msg); err != nil {
+				return fmt.Errorf("failed to unmarshal gemini message line %q %q: %w", path, line, err)
+			}
+
+			msgOut := ThreadMessage{
+				ID:        msg.ID,
+				Timestamp: msg.Timestamp,
+				Type:      msg.Type,
+				Content:   msg.GetContent(),
+				Model:     msg.Model,
+			}
+			for _, toolCall := range msg.ToolCalls {
+				toolCallOut := ToolCall{
+					ID:        toolCall.ID,
+					Name:      toolCall.Name,
+					Arguments: toolCall.Args,
+				}
+				msgOut.ToolCalls = append(msgOut.ToolCalls, toolCallOut)
+			}
+
+			// TODO: Thoughts
+			if msgOut.Content == "" && len(msg.ToolCalls) == 0 {
+				log.Info("could not extract content or tool calls from message", "message", string(line))
+			}
+
+			thread.Messages = append(thread.Messages, msgOut)
+			thread.TotalTokens += msg.Tokens.Total
 		}
-		name := d.Name()
-		if filepath.Ext(name) != ".json" {
-			return nil
-		}
-		if err := parseGeminiSessionFile(path); err != nil {
-			log.Error(err, "failed to parse gemini session file", "path", path)
-		}
+
+		out = append(out, thread)
+
 		return nil
-	}); err != nil {
-		return nil, fmt.Errorf("failed to walk gemini dir %q: %w", geminiDir, err)
+	}
+
+	for projectRoot, projectDirs := range projectRoots {
+		log.Info("Processing project root", "projectRoot", projectRoot, "numSessions", len(projectDirs))
+		for _, projectDir := range projectDirs {
+			if err := filepath.WalkDir(projectDir, func(path string, d os.DirEntry, err error) error {
+				if err != nil {
+					return err
+				}
+				if d.IsDir() {
+					return nil
+				}
+				name := d.Name()
+				if filepath.Ext(name) == ".json" {
+					if err := parseGeminiSessionFile(projectRoot, path); err != nil {
+						log.Error(err, "failed to parse gemini session file", "path", path)
+					}
+				}
+				if filepath.Ext(name) == ".jsonl" {
+					if err := parseJsonlGeminiSessionFile(projectRoot, path); err != nil {
+						log.Error(err, "failed to parse gemini session file", "path", path)
+					}
+				}
+				return nil
+			}); err != nil {
+				return nil, fmt.Errorf("failed to walk project dir %q: %w", projectDir, err)
+			}
+		}
 	}
 
 	return out, nil
 }
 
-// inferWorkspace tries to infer the workspace directory from the gemini session file path.
-// Annoyingly, this is not actually directly stored in the tmp directory, so we have to see if we can guess the workspace and generate a matching hash.
-func inferWorkspace(geminiSessionFilePath string) (string, error) {
-	// gemini session files are stored in /root/.gemini/tmp/<workspace-hash>/chats/session-<session-id>.json
-	chatsDir := filepath.Dir(geminiSessionFilePath)
-	if filepath.Base(chatsDir) != "chats" {
-		return "", fmt.Errorf("unexpected gemini session file path: %q", geminiSessionFilePath)
-	}
-	workspaceDir := filepath.Dir(chatsDir)
-	workspaceHash := filepath.Base(workspaceDir)
+// // inferWorkspace tries to infer the workspace directory from the gemini session file path.
+// // Annoyingly, this is not actually directly stored in the tmp directory, so we have to see if we can guess the workspace and generate a matching hash.
+// func inferWorkspace(geminiSessionFilePath string) (string, error) {
+// 	// gemini session files are stored in /root/.gemini/tmp/<workspace-hash>/chats/session-<session-id>.json
+// 	chatsDir := filepath.Dir(geminiSessionFilePath)
+// 	if filepath.Base(chatsDir) != "chats" {
+// 		return "", fmt.Errorf("unexpected gemini session file path: %q", geminiSessionFilePath)
+// 	}
+// 	workspaceDir := filepath.Dir(chatsDir)
+// 	workspaceHash := filepath.Base(workspaceDir)
 
-	// Check all the directories under /workspaces, which is where dev-sandbox workspaces are stored
-	workspacesDir := "/workspaces"
-	entries, err := os.ReadDir(workspacesDir)
-	if err != nil {
-		return "", fmt.Errorf("failed to read workspaces dir %q: %w", workspacesDir, err)
-	}
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		p := filepath.Join(workspacesDir, entry.Name())
+// 	// Check all the directories under /workspaces, which is where dev-sandbox workspaces are stored
+// 	workspacesDir := "/workspaces"
+// 	entries, err := os.ReadDir(workspacesDir)
+// 	if err != nil {
+// 		return "", fmt.Errorf("failed to read workspaces dir %q: %w", workspacesDir, err)
+// 	}
+// 	for _, entry := range entries {
+// 		if !entry.IsDir() {
+// 			continue
+// 		}
+// 		p := filepath.Join(workspacesDir, entry.Name())
 
-		// Check if the hash of this directory matches the workspace hash
-		hash := computeGeminiWorkspaceHash(p)
-		if hash == workspaceHash {
-			return p, nil
-		}
-	}
+// 		// Check if the hash of this directory matches the workspace hash
+// 		hash := computeGeminiWorkspaceHash(p)
+// 		if hash == workspaceHash {
+// 			return p, nil
+// 		}
+// 	}
 
-	return "", fmt.Errorf("workspace for %q not found", geminiSessionFilePath)
-}
+// 	return "", fmt.Errorf("workspace for %q not found", geminiSessionFilePath)
+// }
 
-func computeGeminiWorkspaceHash(dir string) string {
-	hasher := sha256.New()
-	hasher.Write([]byte(dir))
-	hash := hasher.Sum(nil)
-	return hex.EncodeToString(hash)
-}
+// func computeGeminiWorkspaceHash(dir string) string {
+// 	hasher := sha256.New()
+// 	hasher.Write([]byte(dir))
+// 	hash := hasher.Sum(nil)
+// 	return hex.EncodeToString(hash)
+// }

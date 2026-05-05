@@ -51,7 +51,7 @@ func run(ctx context.Context) error {
 	rootCommand.AddCommand(commands.BuildGithubAutopollCommand())
 
 	rootCommand.AddCommand(commands.BuildThreadsCommand())
- 	rootCommand.AddCommand(commands.BuildThreadsCommand())
+	rootCommand.AddCommand(commands.BuildExecCommand())
 
 	// Commands from review-sandbox
 	reviewDaemon := commands.BuildReviewDaemonCommand()

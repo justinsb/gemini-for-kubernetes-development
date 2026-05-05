@@ -1,6 +1,6 @@
 # --------------------------------
 # Build the repo-sandbox binary
-FROM golang:1.26 AS build-repo-sandbox
+FROM golang:1.26.2 AS build-repo-sandbox
 WORKDIR /app
 
 # Copy the Go Modules manifests
@@ -22,13 +22,15 @@ RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -v -o /repo-sandbox ./cmd
 # --------------------------------
 
 # Build the gh CLI
-FROM golang:1.26 AS build-gh
+FROM golang:1.26.2 AS build-gh
 RUN GOBIN=/bin go install github.com/cli/cli/v2/cmd/gh@v2.82.1
 
 # --------------------------------
 
 # Main image
-FROM golang:1.26
+FROM golang:1.26.2
+
+RUN echo "hello2"
 
 # We want a functional python, because gemini-cli likes to use python
 RUN apt-get update && apt-get install -y python3 python3-pip python3-yaml python-is-python3 python3-venv
@@ -53,6 +55,11 @@ RUN sed -i "s@const DEFAULT_MAX_ATTEMPTS = 5;@const DEFAULT_MAX_ATTEMPTS = 50;@g
 RUN sed -i "s@const DEFAULT_MAX_ATTEMPTS = 10;@const DEFAULT_MAX_ATTEMPTS = 100;@g" ./packages/core/src/utils/retry.ts
 RUN rgrep const.DEFAULT_MAX_ATTEMPTS .
 
+RUN sed -i "s@maxAttempts: 10,;@maxAttempts: 100,;@g" ./packages/core/src/availability/policyCatalog.ts
+
+COPY images/generic-golang/gemini-config.json /root/.config/gemini/config.json
+
+
 RUN npm install
 RUN npm run build
 RUN npm install -g ./packages/cli
@@ -66,7 +73,14 @@ COPY --from=build-gh /bin/gh /bin/gh
 
 RUN ln -sf /usr/local/go/bin/go /usr/local/bin/go
 
+
 RUN gemini --version
+
+RUN apt-get update && apt-get install -y ripgrep
+
+ENV GEMINI_CLI_TRUST_WORKSPACE=true
+
+ENV PATH=/go/bin:/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 WORKDIR /workspaces
 ENTRYPOINT ["/repo-agent/repo-sandbox", "agent"]

@@ -13,15 +13,19 @@ import (
 )
 
 func NewClient(ctx context.Context) (*Client, error) {
-	githubCommand := exec.CommandContext(ctx, "gh", "auth", "token")
-	var stdout bytes.Buffer
-	githubCommand.Stdout = &stdout
-	githubCommand.Stderr = os.Stderr
-	if err := githubCommand.Run(); err != nil {
-		return nil, fmt.Errorf("unable to get github credentials (with gh auth token command): %w", err)
+	token := os.Getenv("GITHUB_TOKEN")
+	if token == "" {
+		githubCommand := exec.CommandContext(ctx, "gh", "auth", "token")
+		var stdout bytes.Buffer
+		githubCommand.Stdout = &stdout
+		githubCommand.Stderr = os.Stderr
+		if err := githubCommand.Run(); err != nil {
+			return nil, fmt.Errorf("unable to get github credentials (with gh auth token command): %w", err)
+		}
+
+		token = strings.TrimSpace(stdout.String())
 	}
 
-	token := strings.TrimSpace(stdout.String())
 	githubAPI := clients.NewGitHubClient(ctx, token)
 	return &Client{Client: githubAPI}, nil
 }

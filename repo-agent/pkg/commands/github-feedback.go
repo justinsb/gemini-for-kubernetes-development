@@ -188,7 +188,7 @@ func RunGithubFeedback(ctx context.Context, opt GithubFeedbackOptions) error {
 		}
 	}
 
-	prompt, err := prompts.FixPRFeedbackPrompt(ctx, githubAPI, repoInfo, pullRequest, haveIDs)
+	prompt, err := prompts.FixPRFeedbackPrompt(ctx, githubAPI, repoInfo, pullRequest, haveIDs, sandbox.Resources())
 	if err != nil {
 		return fmt.Errorf("failed to generate prompt for pull-request: %w", err)
 	}
@@ -215,12 +215,13 @@ func RunGithubFeedback(ctx context.Context, opt GithubFeedbackOptions) error {
 		// export GEMINI_TELEMETRY_ENABLED=true
 		// export GEMINI_TELEMETRY_OTLP_ENDPOINT=http://otel-portal.otel-system:4317
 
-		cmd := []string{"gemini", "--yolo", "--model", model}
+		cmd := []string{"nohup", "gemini", "--yolo", "--model", model}
 		if appendToThread != "" {
 			cmd = append(cmd, "--resume="+appendToThread)
 		}
 		opts := execOptions{
-			Command: []string{"sh", "-c", fmt.Sprintf("cd %s && export GEMINI_API_KEY=%s &&  %s < /workspaces/prompt.txt", workdir, geminiAPIKey, strings.Join(cmd, " "))},
+			// Command: []string{"sh", "-c", fmt.Sprintf("cd %s && export GEMINI_API_KEY=%s &&  %s < /workspaces/prompt.txt > /workspaces/gemini.log 2>&1", workdir, geminiAPIKey, strings.Join(cmd, " "))},
+			Command: []string{"sh", "-c", fmt.Sprintf("cd %s && export GEMINI_API_KEY=%s &&  %s < /workspaces/prompt.txt 2>&1 | tee /workspaces/gemini.log", workdir, geminiAPIKey, strings.Join(cmd, " "))},
 			Stdout:  os.Stdout,
 			Stderr:  os.Stderr,
 		}
@@ -228,8 +229,11 @@ func RunGithubFeedback(ctx context.Context, opt GithubFeedbackOptions) error {
 		opts.Secrets = []string{geminiAPIKey}
 
 		if err := execInPod(ctx, kube, sandbox.podID, opts); err != nil {
+			collectLogs(ctx, kube, sandbox.podID)
 			return fmt.Errorf("running gemini in pod: %w", err)
 		}
+		collectLogs(ctx, kube, sandbox.podID)
+
 	}
 
 	return nil
@@ -276,6 +280,20 @@ func findIssueFromPullRequest(ctx context.Context, repo github.Repo, pullRequest
 		issueURL := toURL(tokens[1])
 		if issueURL != "" {
 			return issueURL, nil
+		}
+	}
+
+	// Check the description sentence by sentence, naively breaking on periods.
+	log.Info("searching pull request body sentences for linked issue", "body", pullRequestBody)
+	sentences := strings.Split(pullRequestBody, ".")
+	for _, sentence := range sentences {
+		sentence = strings.TrimSpace(sentence)
+		tokens := strings.Fields(sentence)
+		if len(tokens) == 2 && (tokens[0] == "Fixes" || tokens[0] == "Resolves") {
+			issueURL := toURL(tokens[1])
+			if issueURL != "" {
+				return issueURL, nil
+			}
 		}
 	}
 

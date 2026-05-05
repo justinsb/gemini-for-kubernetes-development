@@ -5,8 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
+	"slices"
+	"sort"
 
 	"github.com/spf13/cobra"
 	"k8s.io/apimachinery/pkg/types"
@@ -56,7 +59,7 @@ func RunListThreads(ctx context.Context, opt ListThreadsOptions) error {
 	}
 
 	for _, thread := range threads {
-		fmt.Fprintf(os.Stdout, "%v\t%v\t%v\t%v\t%v\n", thread.Workspace, thread.SessionID, thread.ProjectHash, thread.StartTime, thread.TotalTokens)
+		fmt.Fprintf(os.Stdout, "%v\t%v\t%v\t%v\t%v\n", thread.ProjectRoot, thread.SessionID, thread.ProjectHash, thread.StartTime, thread.TotalTokens)
 	}
 
 	return nil
@@ -64,7 +67,7 @@ func RunListThreads(ctx context.Context, opt ListThreadsOptions) error {
 
 // listThreads runs the agent to list threads in the given dev sandbox pod.
 func listThreads(ctx context.Context, podID types.NamespacedName) ([]ThreadInfo, error) {
-	cmd := exec.CommandContext(ctx, "kubectl", "exec", "--namespace", podID.Namespace, podID.Name, "--", repoSandboxBinary, "threads", "agent")
+	cmd := exec.CommandContext(ctx, "kubectl", "exec", "--namespace", podID.Namespace, "-c", "agent", podID.Name, "--", repoSandboxBinary, "threads", "agent")
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = os.Stderr
@@ -76,5 +79,25 @@ func listThreads(ctx context.Context, podID types.NamespacedName) ([]ThreadInfo,
 	if err := json.Unmarshal(stdout.Bytes(), &threads); err != nil {
 		return nil, fmt.Errorf("failed to parse threads agent output: %w", err)
 	}
-	return threads, nil
+
+	sort.Slice(threads, func(i, j int) bool {
+		return threads[i].StartTime.Before(threads[j].StartTime)
+	})
+
+	// Group by session (TODO: move server side)
+	threadsBySession := make(map[string]ThreadInfo)
+	for _, thread := range threads {
+		key := fmt.Sprintf("%s|%s|%s", thread.ProjectRoot, thread.SessionID, thread.ProjectHash)
+		existing, found := threadsBySession[key]
+		if !found {
+			threadsBySession[key] = thread
+		} else {
+			// Merge
+			existing.TotalTokens += thread.TotalTokens
+			existing.Messages = append(existing.Messages, thread.Messages...)
+			threadsBySession[key] = existing
+		}
+	}
+
+	return slices.Collect(maps.Values(threadsBySession)), nil
 }

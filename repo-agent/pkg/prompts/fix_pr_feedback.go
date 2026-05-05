@@ -3,6 +3,7 @@ package prompts
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -22,7 +23,7 @@ import (
 // FixPRFeedbackPrompt generates a prompt to address feedback on a pull request.
 // It includes comments and reviews that have not yet been addressed.
 // alreadyPostedIDs is a set of comment/review IDs that have already been addressed (or at least already appear in the conversation history).
-func FixPRFeedbackPrompt(ctx context.Context, githubAPI *github.Client, repoInfo *github.RepoInfo, pullRequest *github.PullRequest, alreadyPostedIDs map[string]bool) ([]byte, error) {
+func FixPRFeedbackPrompt(ctx context.Context, githubAPI *github.Client, repoInfo *github.RepoInfo, pullRequest *github.PullRequest, alreadyPostedIDs map[string]bool, resources []string) ([]byte, error) {
 	log := klog.FromContext(ctx)
 
 	b := ModelBuilder{
@@ -31,6 +32,8 @@ func FixPRFeedbackPrompt(ctx context.Context, githubAPI *github.Client, repoInfo
 		pullRequest:      pullRequest,
 		alreadyPostedIDs: alreadyPostedIDs,
 	}
+
+	b.model.Resources = resources
 
 	repo := pullRequest.Repo
 
@@ -176,6 +179,8 @@ type FixPRFeedbackPromptModel struct {
 
 	Upstream      string
 	DefaultBranch string
+
+	Resources []string
 }
 
 type PullRequest struct {
@@ -395,7 +400,9 @@ func (b *ModelBuilder) addTestFailures(ctx context.Context) error {
 				for {
 					jobs, _, err := b.githubAPI.Actions.ListWorkflowJobs(ctx, repo.Owner, repo.Name, runID, listWorkflowJobsOptions)
 					if err != nil {
-						return fmt.Errorf("failed to list workflow jobs for pull request: %w", err)
+						klog.Warningf("failed to list workflow jobs for pull request: %v", err)
+						break
+						// return fmt.Errorf("failed to list workflow jobs for pull request: %w", err)
 					}
 					allJobs = append(allJobs, jobs.Jobs...)
 					if jobs.GetTotalCount() <= len(allJobs) {
@@ -437,10 +444,17 @@ func (b *ModelBuilder) addTestFailures(ctx context.Context) error {
 					continue
 				}
 
+				if job.GetConclusion() == "cancelled" {
+					log.Info("Skipping job as conclusion is cancelled", "name", job.GetName())
+					continue
+				}
+
 				// Get the logs for this (failed) check
 				followRedirects := true
 				logsURL, _, err := b.githubAPI.Actions.GetWorkflowJobLogs(ctx, repo.Owner, repo.Name, job.GetID(), followRedirects)
 				if err != nil {
+					j, _ := json.Marshal(job)
+					klog.Infof("job is %+v", string(j))
 					return fmt.Errorf("failed to get workflow run logs for pull request for job %s: %w", job.GetHTMLURL(), err)
 				}
 
@@ -461,15 +475,21 @@ func (b *ModelBuilder) addTestFailures(ctx context.Context) error {
 				logLines := strings.Split(string(logsData), "\n")
 				relevantLines := make(map[int]bool)
 				for lineNum, line := range logLines {
-					if strings.Contains(line, "FAIL:") {
-						relevantLines[lineNum] = true
-					}
 					if strings.Contains(line, "<hint_for_agent>") {
 						relevantLines[lineNum] = true
 					}
 				}
 
-				// Fallback to looking for ERROR if no "high confidence lines" found
+				// Fallback to looking for FAIL: if no "higher confidence lines" found
+				if len(relevantLines) == 0 {
+					for lineNum, line := range logLines {
+						if strings.Contains(line, "FAIL:") {
+							relevantLines[lineNum] = true
+						}
+					}
+				}
+
+				// Fallback to looking for ERROR if no "higher confidence lines" found
 				if len(relevantLines) == 0 {
 					for lineNum, line := range logLines {
 						if strings.Contains(line, "ERROR") || strings.Contains(line, "Error") || strings.Contains(line, "error") {

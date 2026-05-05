@@ -9,6 +9,10 @@ Tips:
 * If you need to rebase, you should fetch upstream and rebase on `upstream/{{ .DefaultBranch }}`
 * Do not forget to push your updated branch when you are done.
 
+{{ range $resource := .Resources }}
+{{ $resource }}
+{{ end }}
+
 
 Your PR:
 

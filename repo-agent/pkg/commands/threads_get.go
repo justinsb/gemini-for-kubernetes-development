@@ -85,7 +85,7 @@ func RunGetThreads(ctx context.Context, opt GetThreadsOptions) error {
 // getThread runs the agent to get a thread in the given dev sandbox pod.
 func getThread(ctx context.Context, podID types.NamespacedName, opt GetThreadsOptions) (*ThreadInfo, error) {
 	args := []string{
-		"kubectl", "exec", "--namespace", podID.Namespace, podID.Name, "--", repoSandboxBinary, "threads", "agent",
+		"kubectl", "exec", "--namespace", podID.Namespace, "-c", "agent", podID.Name, "--", repoSandboxBinary, "threads", "agent",
 	}
 	if opt.IncludeMessages {
 		args = append(args, "--include-messages=true")

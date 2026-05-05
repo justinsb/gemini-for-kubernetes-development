@@ -33,7 +33,8 @@ type ThreadInfo struct {
 
 	Messages []ThreadMessage `json:"messages,omitempty"`
 
-	Workspace string `json:"workspace,omitempty"`
+	// Workspace string `json:"workspace,omitempty"`
+	ProjectRoot string `json:"projectRoot,omitempty"`
 }
 
 type ThreadMessage struct {

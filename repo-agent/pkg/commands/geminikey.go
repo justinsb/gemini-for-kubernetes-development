@@ -32,7 +32,7 @@ func GetGeminiAPIKey(seed string) (string, error) {
 			}
 			env = append(env, e)
 		}
-		env = append(env, fmt.Sprintf("SEED=%s", seed))
+		env = append(env, fmt.Sprintf("SEED=%sa", seed))
 		cmd.Env = env
 
 		out, err := cmd.Output()

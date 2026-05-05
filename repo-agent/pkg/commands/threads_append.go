@@ -85,9 +85,9 @@ func RunAppendToThread(ctx context.Context, opt AppendToThreadOptions) error {
 		return fmt.Errorf("failed to get thread: %w", err)
 	}
 
-	cwd := thread.Workspace
+	cwd := thread.ProjectRoot
 	if cwd == "" {
-		return fmt.Errorf("thread %q does not have a workspace associated with it", opt.ThreadID)
+		return fmt.Errorf("thread %q does not have a projectRoot associated with it", opt.ThreadID)
 	}
 
 	updated, err := appendToThread(ctx, kube, *podID, opt.ThreadID, cwd, comment)

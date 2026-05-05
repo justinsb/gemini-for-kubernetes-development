@@ -8,7 +8,7 @@ import (
 	"github.com/gke-labs/gemini-for-kubernetes-development/repo-agent/pkg/github"
 )
 
-func FixIssuePrompt(ctx context.Context, githubAPI *github.Client, i *github.Issue) ([]byte, error) {
+func FixIssuePrompt(ctx context.Context, githubAPI *github.Client, i *github.Issue, resources []string) ([]byte, error) {
 
 	repo := i.Repo
 
@@ -23,6 +23,7 @@ func FixIssuePrompt(ctx context.Context, githubAPI *github.Client, i *github.Iss
 		IssueTitle:       issueData.GetTitle(),
 		IssueDescription: issueData.GetBody(),
 		Upstream:         repo.GitCloneURL(),
+		Resources:        resources,
 	}
 
 	comments, _, err := githubAPI.Issues.ListComments(ctx, repo.Owner, repo.Name, i.IssueNumber, nil)
@@ -54,6 +55,8 @@ type FixIssuePromptModel struct {
 	IssueTitle       string
 	IssueDescription string
 	IssueComments    []IssueComment
+
+	Resources []string
 
 	Upstream string
 }

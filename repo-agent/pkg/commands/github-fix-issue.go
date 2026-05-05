@@ -3,9 +3,12 @@ package commands
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -87,11 +90,6 @@ func RunGithubFixIssue(ctx context.Context, opt GithubFixIssueOptions) error {
 	}
 	repo := issue.Repo
 
-	prompt, err := prompts.FixIssuePrompt(ctx, githubAPI, issue)
-	if err != nil {
-		return fmt.Errorf("failed to generate prompt for issue: %w", err)
-	}
-
 	sandbox, found, err := findSandboxForIssue(ctx, kube, repo, issue)
 	if err != nil {
 		return err
@@ -102,6 +100,11 @@ func RunGithubFixIssue(ctx context.Context, opt GithubFixIssueOptions) error {
 		if err != nil {
 			return fmt.Errorf("launching sandbox for issue: %w", err)
 		}
+	}
+
+	prompt, err := prompts.FixIssuePrompt(ctx, githubAPI, issue, sandbox.Resources())
+	if err != nil {
+		return fmt.Errorf("failed to generate prompt for issue: %w", err)
 	}
 
 	geminiAPIKey, err := GetGeminiAPIKey(sandbox.podID.Namespace + "/" + sandbox.podID.Name)
@@ -158,11 +161,75 @@ func RunGithubFixIssue(ctx context.Context, opt GithubFixIssueOptions) error {
 		opts.Secrets = []string{geminiAPIKey}
 
 		if err := execInPod(ctx, kube, sandbox.podID, opts); err != nil {
+			collectLogs(ctx, kube, sandbox.podID)
 			return fmt.Errorf("running gemini: %w", err)
 		}
+		collectLogs(ctx, kube, sandbox.podID)
+
 	}
 
 	return nil
+}
+
+// collectLogs will download the logs from the specified pod and write them to the the _logs directory.
+func collectLogs(ctx context.Context, kube *clients.KubernetesClient, podID types.NamespacedName) error {
+	log := klog.FromContext(ctx)
+
+	logDir := filepath.Join("_logs", podID.Namespace+"_"+podID.Name, time.Now().Format("20060102_150405"))
+
+	if err := os.MkdirAll(logDir, 0755); err != nil {
+		return fmt.Errorf("creating logs directory: %w", err)
+	}
+
+	downloadKubeLogs := func() error {
+		logs, err := kube.Clientset.CoreV1().Pods(podID.Namespace).GetLogs(podID.Name, &v1.PodLogOptions{Container: "agent"}).Do(ctx).Raw()
+		if err != nil {
+			return fmt.Errorf("failed to get logs from pod: %w", err)
+		}
+
+		logFilePath := filepath.Join(logDir, "pod.log")
+		if err := os.WriteFile(logFilePath, logs, 0644); err != nil {
+			return fmt.Errorf("failed to write logs to file: %w", err)
+		}
+		return nil
+	}
+
+	downloadGeminiLogs := func() error {
+		// Run kubectl cp -c agent <pod>:/root/.gemini/tmp <local-dir>
+		cmd := exec.CommandContext(ctx, "kubectl", "cp", "-c", "agent", fmt.Sprintf("%s/%s:/root/.gemini", podID.Namespace, podID.Name), filepath.Join(logDir, "gemini-logs"))
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("failed to copy gemini logs from pod: %w: %s", err, stderr.String())
+		}
+
+		return nil
+	}
+
+	downloadGeminiStdout := func() error {
+		// Run kubectl cp -c agent <pod>:/root/.gemini/tmp <local-dir>
+		cmd := exec.CommandContext(ctx, "kubectl", "cp", "-c", "agent", fmt.Sprintf("%s/%s:/workspaces/gemini.log", podID.Namespace, podID.Name), filepath.Join(logDir, "gemini.log"))
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("failed to copy gemini stdout log from pod: %w: %s", err, stderr.String())
+		}
+
+		return nil
+	}
+
+	var errs []error
+	errs = append(errs, downloadKubeLogs())
+	errs = append(errs, downloadGeminiLogs())
+	errs = append(errs, downloadGeminiStdout())
+
+	err := errors.Join(errs...)
+	if err != nil {
+		log.Error(err, "Failed to collect logs from pod", "pod", podID)
+	} else {
+		log.Info("Collected logs from pod", "pod", podID, "logDir", logDir)
+	}
+	return err
 }
 
 type execOptions struct {
@@ -185,11 +252,12 @@ func execInPod(ctx context.Context, kube *clients.KubernetesClient, podID types.
 
 	podExecOptions := &v1.PodExecOptions{
 		// Container: containerName,
-		Command: opts.Command,
-		Stdin:   true,
-		Stdout:  true,
-		Stderr:  true,
-		TTY:     false,
+		Container: "agent",
+		Command:   opts.Command,
+		Stdin:     true,
+		Stdout:    true,
+		Stderr:    true,
+		TTY:       false,
 	}
 	if opts.Stdin == nil {
 		podExecOptions.Stdin = false

@@ -1,3 +1,4 @@
+*.log
 keys-e2e.sh
 keys-local.sh
 keys-preview.sh

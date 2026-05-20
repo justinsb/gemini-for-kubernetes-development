@@ -53,9 +53,12 @@ WORKDIR /opt/gemini-cli
 RUN rgrep const.DEFAULT_MAX_ATTEMPTS .
 RUN sed -i "s@const DEFAULT_MAX_ATTEMPTS = 5;@const DEFAULT_MAX_ATTEMPTS = 50;@g" ./packages/core/src/core/baseLlmClient.ts
 RUN sed -i "s@const DEFAULT_MAX_ATTEMPTS = 10;@const DEFAULT_MAX_ATTEMPTS = 100;@g" ./packages/core/src/utils/retry.ts
+RUN sed -i "s@maxAttempts: 10,@maxAttempts: 100,@g" ./packages/core/src/availability/policyCatalog.ts
+RUN sed -i "s@maxAttempts: 10,@maxAttempts: 100,@g" ./packages/core/src/config/defaultModelConfigs.ts
 RUN rgrep const.DEFAULT_MAX_ATTEMPTS .
 
-RUN sed -i "s@maxAttempts: 10,;@maxAttempts: 100,;@g" ./packages/core/src/availability/policyCatalog.ts
+COPY images/generic-golang/retry.patch /tmp/
+RUN patch ./packages/core/src/utils/retry.ts /tmp/retry.patch
 
 COPY images/generic-golang/gemini-config.json /root/.config/gemini/config.json
 

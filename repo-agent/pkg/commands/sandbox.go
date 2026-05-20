@@ -491,15 +491,21 @@ func (s *CodebotSandbox) SetupGitRepos(ctx context.Context) error {
 		}
 	}
 
-	// Run gh repo fork
-	log.Info("Forking repository in pod", "pod", s.podID.Name, "repo", s.repo.GitCloneURL())
-	{
-		// TODO: Does gh support -C ?
-		opts := execOptions{
-			Command: []string{"sh", "-c", fmt.Sprintf("cd %s && gh repo fork --remote", workdir)},
-		}
-		if err := execInPod(ctx, s.kube, s.podID, opts); err != nil {
-			return fmt.Errorf("running gh repo fork in pod: %w", err)
+	shouldFork := true
+	if strings.Contains(s.repo.GitCloneURL(), "/sandboxes") {
+		shouldFork = false
+	}
+	if shouldFork {
+		// Run gh repo fork
+		log.Info("Forking repository in pod", "pod", s.podID.Name, "repo", s.repo.GitCloneURL())
+		{
+			// TODO: Does gh support -C ?
+			opts := execOptions{
+				Command: []string{"sh", "-c", fmt.Sprintf("cd %s && gh repo fork --remote", workdir)},
+			}
+			if err := execInPod(ctx, s.kube, s.podID, opts); err != nil {
+				return fmt.Errorf("running gh repo fork in pod: %w", err)
+			}
 		}
 	}
 
@@ -512,7 +518,7 @@ func (s *CodebotSandbox) SetupGitRepos(ctx context.Context) error {
 			Command: []string{"sh", "-c", fmt.Sprintf("cd %s && gh repo set-default %s", workdir, defaultRepo)},
 		}
 		if err := execInPod(ctx, s.kube, s.podID, opts); err != nil {
-			return fmt.Errorf("running gh repo fork in pod: %w", err)
+			return fmt.Errorf("running gh repo set-default in pod: %w", err)
 		}
 
 	}

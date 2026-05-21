@@ -66,11 +66,12 @@ func NewAgentSandbox(opt AgentSandboxOptions) (*unstructured.Unstructured, *core
 	if resources.Limits.Cpu().IsZero() {
 		resources.Limits[corev1.ResourceCPU] = resource.MustParse("4000m")
 	}
+	ephemeralStorageSize := "20Gi"
 	if _, ok := resources.Requests["ephemeral-storage"]; !ok {
-		resources.Requests["ephemeral-storage"] = resource.MustParse("6Gi")
+		resources.Requests["ephemeral-storage"] = resource.MustParse(ephemeralStorageSize)
 	}
 	if _, ok := resources.Limits["ephemeral-storage"]; !ok {
-		resources.Limits["ephemeral-storage"] = resource.MustParse("6Gi")
+		resources.Limits["ephemeral-storage"] = resource.MustParse(ephemeralStorageSize)
 	}
 
 	labelsInterface := make(map[string]interface{}, len(opt.Labels)+1)
@@ -201,6 +202,8 @@ func NewReviewSandbox(opt ReviewSandboxOptions) (*unstructured.Unstructured, *co
 	labels["sandbox"] = sandboxName
 	labels["sandbox-type"] = "review"
 
+	ephemeralStorageSize := "20Gi"
+
 	annotations := make(map[string]interface{})
 	for k, v := range opt.Annotations {
 		annotations[k] = v
@@ -245,10 +248,10 @@ func NewReviewSandbox(opt ReviewSandboxOptions) (*unstructured.Unstructured, *co
 								"command": []interface{}{"envd"},
 								"resources": map[string]interface{}{
 									"limits": map[string]interface{}{
-										"ephemeral-storage": "6Gi",
+										"ephemeral-storage": ephemeralStorageSize,
 									},
 									"requests": map[string]interface{}{
-										"ephemeral-storage": "6Gi",
+										"ephemeral-storage": ephemeralStorageSize,
 									},
 								},
 								"env": env,

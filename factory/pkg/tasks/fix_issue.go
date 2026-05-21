@@ -60,6 +60,7 @@ type FailedRun struct {
 }
 
 type PRComment struct {
+	ID        int64
 	UserLogin string
 	CreatedAt string
 	Body      string
@@ -85,7 +86,7 @@ func GetInvestigateScript() ([]byte, error) {
 
 func RenderInvestigatePrompt(params InvestigateParams) ([]byte, error) {
 	if len(params.Models) == 0 {
-		params.Models = []string{"gemini-3-flash-preview", "gemini-3.1-pro-preview", "gemini-2.5-pro"}
+		params.Models = []string{"gemini-3.5-flash", "gemini-3.1-pro-preview"}
 	}
 
 	promptTmpl, err := getPromptTemplate("investigate_failures.txt")
@@ -134,7 +135,7 @@ func GetAddressFeedbackScript() ([]byte, error) {
 
 func RenderAddressFeedbackPrompt(params AddressFeedbackParams) ([]byte, error) {
 	if len(params.Models) == 0 {
-		params.Models = []string{"gemini-3-flash-preview", "gemini-3.1-pro-preview", "gemini-2.5-pro"}
+		params.Models = []string{"gemini-3.5-flash", "gemini-3.1-pro-preview"}
 	}
 
 	promptTmpl, err := getPromptTemplate("address_feedback.txt")

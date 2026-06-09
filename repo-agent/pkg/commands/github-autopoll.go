@@ -141,11 +141,41 @@ type Info struct {
 func (p *AutoPoller) pollOnce(ctx context.Context) error {
 	log := klog.FromContext(ctx)
 
+	log.Info("Polling GitHub", "repos", p.opt.Repos, "assignedTo", p.opt.AssignedTo)
+
 	for _, repoStr := range p.opt.Repos {
+		if err := p.pollRepo(ctx, repoStr); err != nil {
+			log.Error(err, "error polling repo", "repo", repoStr)
+			// Don't return error, continue polling other repos
+		}
+	}
+
+	{
+		var running []string
+		p.runningMutex.Lock()
+		for k, info := range p.running {
+			if info.Done {
+				continue
+			}
+			running = append(running, k)
+		}
+		p.runningMutex.Unlock()
+
+		log.Info("Currently processing", "count", len(running), "prs", running)
+	}
+
+	return nil
+}
+
+func (p *AutoPoller) pollRepo(ctx context.Context, repoStr string) error {
+	log := klog.FromContext(ctx)
+
+	log.V(2).Info("polling repository", "repo", repoStr)
+
+	{
 		repo, err := github.ParseRepo(repoStr)
 		if err != nil {
-			log.Error(err, "failed to parse repo", "repo", repoStr)
-			continue
+			return fmt.Errorf("failed to parse repo %q: %w", repoStr, err)
 		}
 
 		log.V(2).Info("Polling repository", "repo", repoStr)
@@ -227,14 +257,16 @@ func (p *AutoPoller) pollOnce(ctx context.Context) error {
 			}(issueURL)
 		}
 
-		prs, _, err := p.githubAPI.PullRequests.List(ctx, repo.Owner, repo.Name, &gogithub.PullRequestListOptions{
+		options := &gogithub.PullRequestListOptions{
 			State:     "open",
 			Sort:      "updated",
 			Direction: "desc",
-		})
+		}
+		options.PerPage = 100
+
+		prs, _, err := p.githubAPI.PullRequests.List(ctx, repo.Owner, repo.Name, options)
 		if err != nil {
-			log.Error(err, "failed to list pull requests for repo", "repo", repoStr)
-			continue
+			return fmt.Errorf("failed to list pull requests for %s: %w", repoStr, err)
 		}
 
 		log.V(2).Info("Found pull requests assigned to bot", "repo", repoStr, "count", len(prs))
@@ -246,20 +278,6 @@ func (p *AutoPoller) pollOnce(ctx context.Context) error {
 			}
 		}
 
-	}
-
-	{
-		var running []string
-		p.runningMutex.Lock()
-		for k, info := range p.running {
-			if info.Done {
-				continue
-			}
-			running = append(running, k)
-		}
-		p.runningMutex.Unlock()
-
-		log.Info("Currently processing", "count", len(running), "prs", running)
 	}
 
 	return nil

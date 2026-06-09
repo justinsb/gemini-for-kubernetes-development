@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -259,12 +260,18 @@ func findIssueFromPullRequest(ctx context.Context, repo github.Repo, pullRequest
 	}
 
 	// First, check the pull request body for "Fixes: <issue-url>" or "Resolves: <issue-url>"
+	issueKeyFields := []string{"Fixes", "Resolves", "Issue", "Fixes:", "Resolves:", "Issue:"}
+
 	pullRequestBody := pullRequest.GetBody()
+
+	// Replace literal newlines with actual newlines; I think sometimes we accidentally use "\n"
+	pullRequestBody = strings.ReplaceAll(pullRequestBody, "\\n", "\n")
+
 	log.Info("searching pull request body for linked issue", "body", pullRequestBody)
 	for _, line := range strings.Split(pullRequestBody, "\n") {
 		line = strings.TrimSpace(line)
 		tokens := strings.Fields(line)
-		if len(tokens) >= 2 && (tokens[0] == "Fixes:" || tokens[0] == "Resolves:" || tokens[0] == "Fixes" || tokens[0] == "Resolves") {
+		if len(tokens) >= 2 && slices.Contains(issueKeyFields, tokens[0]) {
 			issueURL := toURL(tokens[1])
 			if issueURL != "" {
 				return issueURL, nil
@@ -276,7 +283,7 @@ func findIssueFromPullRequest(ctx context.Context, repo github.Repo, pullRequest
 	pullRequestTitle := pullRequest.GetTitle()
 	log.Info("searching pull request title for linked issue", "title", pullRequestTitle)
 	tokens := strings.Fields(pullRequestTitle)
-	if len(tokens) >= 2 && (tokens[0] == "Fixes" || tokens[0] == "Resolves") {
+	if len(tokens) >= 2 && slices.Contains(issueKeyFields, tokens[0]) {
 		issueURL := toURL(tokens[1])
 		if issueURL != "" {
 			return issueURL, nil
@@ -289,7 +296,7 @@ func findIssueFromPullRequest(ctx context.Context, repo github.Repo, pullRequest
 	for _, sentence := range sentences {
 		sentence = strings.TrimSpace(sentence)
 		tokens := strings.Fields(sentence)
-		if len(tokens) == 2 && (tokens[0] == "Fixes" || tokens[0] == "Resolves") {
+		if len(tokens) == 2 && slices.Contains(issueKeyFields, tokens[0]) {
 			issueURL := toURL(tokens[1])
 			if issueURL != "" {
 				return issueURL, nil
